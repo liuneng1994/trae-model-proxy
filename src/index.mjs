@@ -19,7 +19,7 @@ import {
   sendJson,
   writeCors,
 } from './util/http.mjs';
-import { inc, addGauge, renderPrometheus } from './util/metrics.mjs';
+import { inc, addGauge, setGauge, renderPrometheus } from './util/metrics.mjs';
 import { info, error as logError } from './util/logger.mjs';
 import { getQueueState } from './util/state.mjs';
 import { safeEqual, isLoopbackHost } from './util/security.mjs';
