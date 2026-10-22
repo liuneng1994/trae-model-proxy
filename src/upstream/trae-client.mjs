@@ -117,7 +117,42 @@ function parseToolCalls(raw) {
  *   { type: 'usage', usage }
  *   { type: 'done', finishReason }
  */
-export async function* streamChat(params, { signal } = {}) {
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new Error('aborted'));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason || new Error('aborted'));
+        },
+        { once: true },
+      );
+    }
+  });
+}
+
+function retryDelayMs(attempt, response) {
+  const baseMs = Number(process.env.TRAE_RETRY_BASE_MS) || config.retryBaseMs;
+  const maxMs = Number(process.env.TRAE_RETRY_MAX_MS) || config.retryMaxMs;
+  const retryAfter = response?.headers?.get?.('retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, maxMs);
+    }
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.min(Math.max(0, date - Date.now()), maxMs);
+  }
+  return Math.min(baseMs * 2 ** Math.max(0, attempt - 1), maxMs);
+}
+
+async function* streamChatOnce(params, { signal } = {}) {
   const body = buildBody(params);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error('upstream timeout')), config.requestTimeoutMs);
@@ -129,7 +164,7 @@ export async function* streamChat(params, { signal } = {}) {
 
   let response;
   try {
-    response = await fetch(config.chatUrl, {
+    response = await fetch(process.env.TRAE_CHAT_URL || config.chatUrl, {
       method: 'POST',
       headers: buildHeaders(),
       body: JSON.stringify(body),
@@ -140,6 +175,7 @@ export async function* streamChat(params, { signal } = {}) {
     if (signal) signal.removeEventListener('abort', onAbort);
     throw new UpstreamError(`Failed to reach TRAE model gateway: ${err.message}`, {
       status: 502,
+      retryable: true,
       cause: err,
     });
   }
@@ -152,7 +188,11 @@ export async function* streamChat(params, { signal } = {}) {
         status === 401 || status === 403
           ? 'TRAE rejected the access token. Run `traecli login` and retry.'
           : `TRAE model gateway returned HTTP ${status}: ${text.slice(0, 500)}`,
-        { status: status === 401 || status === 403 ? 401 : 502, code: status },
+        {
+          status: status === 401 || status === 403 ? 401 : 502,
+          code: status,
+          retryable: status === 429 || status >= 500,
+        },
       );
     }
 
@@ -249,6 +289,42 @@ export async function* streamChat(params, { signal } = {}) {
   } finally {
     clearTimeout(timeout);
     if (signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+export async function* streamChat(params, { signal } = {}) {
+  const attempts = Math.max(1, Number(process.env.TRAE_MAX_ATTEMPTS) || config.maxAttempts);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let hasOutput = false;
+    try {
+      for await (const event of streamChatOnce(params, { signal })) {
+        if (
+          event.type === 'text' ||
+          event.type === 'reasoning' ||
+          event.type === 'tool_start' ||
+          event.type === 'tool_args' ||
+          event.type === 'tool_end' ||
+          event.type === 'usage' ||
+          event.type === 'done'
+        ) {
+          hasOutput = true;
+        }
+        yield event;
+      }
+      return;
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      const retryable = err?.retryable === true;
+      if (retryable && !hasOutput && attempt < attempts) {
+        const delay = retryDelayMs(attempt);
+        if (config.verbose) {
+          console.warn(`[upstream] retry ${attempt}/${attempts} in ${delay}ms: ${err.message}`);
+        }
+        await sleep(delay, signal);
+        continue;
+      }
+      throw err;
+    }
   }
 }
 

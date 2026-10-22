@@ -8,6 +8,7 @@ import {
   normalizeReasoningEffort,
   textBlock,
   toTraeTool,
+  toolChoiceInstruction,
 } from './common.mjs';
 import { endSSE, startSSE, writeSSE } from '../util/http.mjs';
 
@@ -31,6 +32,14 @@ function contentBlocks(content) {
     }
   }
   return blocks.length ? blocks : [textBlock('')];
+}
+
+function normalizeToolChoice(choice) {
+  if (choice === 'auto' || choice === 'none' || choice === 'required') return choice;
+  if (choice && choice.type === 'function' && choice.function?.name) {
+    return { type: 'function', function: { name: choice.function.name } };
+  }
+  return undefined;
 }
 
 export function toTraeRequest(body, model, ids = {}) {
@@ -80,6 +89,11 @@ export function toTraeRequest(body, model, ids = {}) {
   const tools = (body.tools || [])
     .filter((tool) => tool && tool.type === 'function' && tool.function)
     .map((tool) => toTraeTool(tool.function.name, tool.function.description, tool.function.parameters));
+
+  const instruction = toolChoiceInstruction(normalizeToolChoice(body.tool_choice));
+  if (instruction) {
+    messages.unshift({ role: 'system', content: [textBlock(instruction)] });
+  }
 
   return {
     model,

@@ -224,8 +224,7 @@ export function toCodexCatalog(models) {
   };
 }
 
-export async function resolveModel(modelId) {
-  const models = await listModels();
+export function resolveModelFromList(models, modelId) {
   let normalized = String(modelId || '');
   if (normalized.startsWith('claude-trae-')) {
     normalized = normalized.slice('claude-trae-'.length);
@@ -258,6 +257,10 @@ export async function resolveModel(modelId) {
 
   const available = models.map((model) => model.id).join(', ');
   throw new ModelError(`Unknown model "${modelId}". Available models: ${available}`, 404);
+}
+
+export async function resolveModel(modelId) {
+  return resolveModelFromList(await listModels(), modelId);
 }
 
 export function toOpenAiModel(model) {

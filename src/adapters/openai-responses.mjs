@@ -7,6 +7,7 @@ import {
   normalizeReasoningEffort,
   textBlock,
   toTraeTool,
+  toolChoiceInstruction,
 } from './common.mjs';
 import { endSSE, startSSE, writeSSEEvent } from '../util/http.mjs';
 
@@ -36,6 +37,17 @@ function lastUserInput(messages) {
     }
   }
   return '';
+}
+
+function normalizeToolChoice(choice) {
+  if (typeof choice === 'string') {
+    if (choice === 'auto' || choice === 'none' || choice === 'required') return choice;
+    return undefined;
+  }
+  if (choice && choice.type === 'function' && choice.name) {
+    return { type: 'function', function: { name: choice.name } };
+  }
+  return undefined;
 }
 
 export function toTraeRequest(body, model, ids = {}) {
@@ -87,6 +99,11 @@ export function toTraeRequest(body, model, ids = {}) {
   const tools = (body.tools || [])
     .filter((tool) => tool && tool.type === 'function')
     .map((tool) => toTraeTool(tool.name, tool.description, tool.parameters));
+
+  const instruction = toolChoiceInstruction(normalizeToolChoice(body.tool_choice));
+  if (instruction) {
+    messages.unshift({ role: 'system', content: [textBlock(instruction)] });
+  }
 
   return {
     model,
@@ -143,6 +160,13 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   if (!body.stream) {
     const result = await completeChat(params, { signal });
     const output = [];
+    if (result.reasoning) {
+      output.push({
+        id: `rs_${Date.now().toString(36)}`,
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: result.reasoning }],
+      });
+    }
     if (result.text) {
       output.push(messageItem(`msg_${Date.now().toString(36)}`, result.text));
     }
@@ -183,6 +207,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   let nextOutputIndex = 0;
   let usage = null;
   let queueItem = null;
+  let modelReasoningItem = null;
   const toolItems = new Map();
   const outputItems = [];
 
@@ -257,6 +282,53 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
     outputItems.push({ outputIndex: queueItem.outputIndex, item });
   };
 
+  const ensureModelReasoningItem = () => {
+    if (modelReasoningItem && !modelReasoningItem.closed) return modelReasoningItem;
+    modelReasoningItem = null;
+    const itemId = `rs_${Date.now().toString(36)}_m`;
+    const outputIndex = nextOutputIndex;
+    nextOutputIndex += 1;
+    modelReasoningItem = { itemId, outputIndex, text: '', closed: false };
+    send('response.output_item.added', {
+      output_index: outputIndex,
+      item: { id: itemId, type: 'reasoning', summary: [] },
+    });
+    send('response.reasoning_summary_part.added', {
+      item_id: itemId,
+      output_index: outputIndex,
+      summary_index: 0,
+      part: { type: 'summary_text', text: '' },
+    });
+    return modelReasoningItem;
+  };
+
+  const closeModelReasoningItem = () => {
+    if (!modelReasoningItem || modelReasoningItem.closed) return;
+    modelReasoningItem.closed = true;
+    send('response.reasoning_summary_text.done', {
+      item_id: modelReasoningItem.itemId,
+      output_index: modelReasoningItem.outputIndex,
+      summary_index: 0,
+      text: modelReasoningItem.text,
+    });
+    send('response.reasoning_summary_part.done', {
+      item_id: modelReasoningItem.itemId,
+      output_index: modelReasoningItem.outputIndex,
+      summary_index: 0,
+      part: { type: 'summary_text', text: modelReasoningItem.text },
+    });
+    const item = {
+      id: modelReasoningItem.itemId,
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: modelReasoningItem.text }],
+    };
+    send('response.output_item.done', {
+      output_index: modelReasoningItem.outputIndex,
+      item,
+    });
+    outputItems.push({ outputIndex: modelReasoningItem.outputIndex, item });
+  };
+
   try {
     for await (const event of streamChat(params, { signal })) {
       switch (event.type) {
@@ -283,8 +355,21 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           );
           break;
         }
+        case 'reasoning': {
+          closeQueueItem();
+          const item = ensureModelReasoningItem();
+          item.text += event.delta;
+          send('response.reasoning_summary_text.delta', {
+            item_id: item.itemId,
+            output_index: item.outputIndex,
+            summary_index: 0,
+            delta: event.delta,
+          });
+          break;
+        }
         case 'text':
           closeQueueItem();
+          closeModelReasoningItem();
           ensureMessage();
           messageText += event.delta;
           send('response.output_text.delta', {
@@ -296,6 +381,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           break;
         case 'tool_start': {
           closeQueueItem();
+          closeModelReasoningItem();
           const itemId = `fc_${event.index}_${Date.now().toString(36)}`;
           const outputIndex = nextOutputIndex;
           nextOutputIndex += 1;
@@ -338,6 +424,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
     }
 
     closeQueueItem();
+    closeModelReasoningItem();
 
     if (messageId) {
       send('response.output_text.done', {

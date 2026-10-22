@@ -39,6 +39,13 @@ function readAuthFile() {
     );
   }
 
+  const expiresAtMs = trae.expires_at ? Date.parse(trae.expires_at) : null;
+  if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+    throw new AuthError(
+      'TRAE access token has expired. Run `traecli login` and retry.',
+    );
+  }
+
   cached = {
     token,
     scheme: 'Cloud-CLI-JWT',

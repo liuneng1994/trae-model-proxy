@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { listModels, toCodexCatalog } from '../src/models.mjs';
+import { getAuth } from '../src/auth.mjs';
 
 const PROVIDER_ID = 'trae_proxy';
 const PROVIDER_SECTION = `[model_providers.${PROVIDER_ID}]`;
@@ -220,6 +221,8 @@ async function syncCodexCatalog(options) {
     return null;
   }
 
+  // Fail fast instead of writing a fallback catalog when TRAE is not logged in.
+  getAuth();
   const models = await listModels({ refresh: true });
   const catalog = toCodexCatalog(models);
   if (options.dryRun) {

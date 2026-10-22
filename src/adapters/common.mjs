@@ -109,6 +109,19 @@ export function reasoningEffortFromBudget(budgetTokens) {
   return 'high';
 }
 
+export function toolChoiceInstruction(choice) {
+  if (!choice) return null;
+  if (choice === 'none') return 'Do not call any tools for this request. Answer directly.';
+  if (choice === 'required') {
+    return 'You must call at least one available tool before answering.';
+  }
+  if (choice === 'auto') return null;
+  if (typeof choice === 'object' && choice.type === 'function' && choice.function?.name) {
+    return `You must call the tool "${choice.function.name}" before answering.`;
+  }
+  return null;
+}
+
 export function makeSessionIds(headerValue) {
   if (headerValue && typeof headerValue === 'string' && headerValue.length <= 128) {
     return { sessionId: headerValue, conversationId: headerValue };

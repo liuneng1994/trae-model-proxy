@@ -40,7 +40,10 @@ function authorized(req) {
 
 function estimateTokens(body) {
   const text = JSON.stringify(body || {});
-  return Math.max(1, Math.ceil(text.length / 4));
+  // Approximate mixed CJK/Latin tokenization: CJK ~= 1 token/char, Latin ~= 4 chars/token.
+  const cjk = (text.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+  const rest = text.length - cjk;
+  return Math.max(1, Math.ceil(cjk + rest / 4));
 }
 
 async function route(req, res) {
@@ -151,7 +154,16 @@ async function route(req, res) {
   }
 
   const ids = requestIds(req);
-  const signal = AbortSignal.timeout(config.requestTimeoutMs);
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error('proxy request timeout')),
+    config.requestTimeoutMs,
+  );
+  const onClientClose = () => {
+    if (!res.writableEnded) controller.abort(new Error('client disconnected'));
+  };
+  res.on('close', onClientClose);
+  const signal = controller.signal;
   const started = Date.now();
   console.log(`[proxy] ${req.method} ${url.pathname} model=${modelId} stream=${Boolean(body.stream)}`);
   if (config.verbose) {
@@ -191,6 +203,8 @@ async function route(req, res) {
       res.end();
     }
   } finally {
+    clearTimeout(timeout);
+    res.off('close', onClientClose);
     console.log(`[proxy] done ${url.pathname} in ${Date.now() - started}ms`);
   }
 }

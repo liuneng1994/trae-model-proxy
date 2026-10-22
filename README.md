@@ -190,6 +190,21 @@ claude -p "Reply with exactly: CLAUDE_OK"
 
 Claude Code 对自定义模型会提示 `unrecognized model` 并按 200k 上下文处理，这是客户端的模型元数据提示，不影响调用。需要工具调用时加 `--allowedTools "Read"` 等参数。
 
+## 工具调用与推理
+
+- `tool_choice` 支持 `auto` / `none` / `required` / 指定工具。由于 TRAE 上游会拒绝原生 `tool_choice` 字段，代理会把它转换成系统指令，再交给模型执行。
+- Responses API 会透传模型的 `reasoning`，输出 `response.reasoning_summary_text.delta/done`；Codex 设置 `model_reasoning_summary = "detailed"` 即可看到。
+- Anthropic 的 `thinking` / `output_config.effort`、OpenAI 的 `reasoning_effort` 都会映射到上游的 `reasoning_effort`。
+- Anthropic 的 `cache_control` 会在 system / tool_result 文本块上保留。
+
+## 测试
+
+```bash
+npm test
+```
+
+当前覆盖 SSE 分片解析、三种协议的请求转换、模型/别名解析、Codex 目录生成、429 重试。
+
 ## 配置项
 
 | 环境变量 | 默认值 | 说明 |
@@ -203,6 +218,9 @@ Claude Code 对自定义模型会提示 `unrecognized model` 并按 200k 上下�
 | `TRAE_AUTH_FILE` | `~/.trae/cli/auth.json` | TRAE 登录凭证路径 |
 | `TRAECLI_BIN` | `traecli` | 用于读取模型目录 |
 | `PROXY_REQUEST_TIMEOUT_MS` | `300000` | 上游请求超时 |
+| `TRAE_MAX_ATTEMPTS` | `3` | 上游 429/5xx 最大尝试次数 |
+| `TRAE_RETRY_BASE_MS` | `500` | 重试退避基数 |
+| `TRAE_RETRY_MAX_MS` | `10000` | 单次重试最大等待 |
 | `PROXY_VERBOSE` | `0` | 输出调试日志 |
 
 ## 协议抓包（开发用）
@@ -220,8 +238,10 @@ TRAE_API_BASE_URL=http://127.0.0.1:8788 traecli exec -m Seed-2.1-Turbo "reply OK
 
 - TRAE 的 `llm_raw_chat` 是内部协议，TRAE CLI 升级后可能需要重新抓包调整字段。
 - 文本、reasoning、tool calls 已支持；图片输入按 `image_url` 尽力透传，未做完整验证。
-- `tool_choice` 暂未强制透传，模型会根据工具描述自行决定是否调用。
-- 上游返回 429 / 4019 时，代理会返回对应的 429 / 403 错误，需要等待配额恢复或重新 `traecli login`。
+- `tool_choice` 会转换成系统指令，不是原生上游字段；强制工具调用的确定性弱于原生支持。
+- `/v1/messages/count_tokens` 是启发式估算，不是精确 tokenizer。
+- Access token 过期后需要手动执行 `traecli login`，代理不会自动刷新。
+- 上游返回 429 / 5xx 会自动重试；4019 等风控错误不会重试。
 - 本工具只适合本机个人使用，默认只监听 `127.0.0.1`，不要直接暴露到公网。
 
 ## 安全说明

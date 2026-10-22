@@ -9,6 +9,7 @@ import {
   reasoningEffortFromBudget,
   textBlock,
   toTraeTool,
+  toolChoiceInstruction,
 } from './common.mjs';
 import { endSSE, startSSE, writeSSEEvent } from '../util/http.mjs';
 
@@ -33,13 +34,29 @@ function anthropicContentBlocks(content) {
   for (const part of content) {
     if (!part) continue;
     if (part.type === 'text') {
-      blocks.push(textBlock(part.text || ''));
+      const block = textBlock(part.text || '');
+      if (part.cache_control) block.cache_control = part.cache_control;
+      blocks.push(block);
     } else if (part.type === 'image') {
       const image = imageBlock(part.source);
-      if (image) blocks.push(image);
+      if (image) {
+        if (part.cache_control) image.cache_control = part.cache_control;
+        blocks.push(image);
+      }
     }
   }
   return blocks.length ? blocks : [textBlock('')];
+}
+
+function normalizeToolChoice(choice) {
+  if (!choice || typeof choice !== 'object') return undefined;
+  if (choice.type === 'auto') return 'auto';
+  if (choice.type === 'any') return 'required';
+  if (choice.type === 'none') return 'none';
+  if (choice.type === 'tool' && choice.name) {
+    return { type: 'function', function: { name: choice.name } };
+  }
+  return undefined;
 }
 
 export function toTraeRequest(body, model, ids = {}) {
@@ -109,9 +126,11 @@ export function toTraeRequest(body, model, ids = {}) {
         if (textBlocks.length) {
           messages.push({ role: 'user', content: textBlocks.splice(0) });
         }
+        const toolBlock = textBlock(asText(part.content));
+        if (part.cache_control) toolBlock.cache_control = part.cache_control;
         messages.push({
           role: 'tool',
-          content: [textBlock(asText(part.content))],
+          content: [toolBlock],
           name: toolNames.get(part.tool_use_id) || 'tool',
           tool_call_id: part.tool_use_id || '',
         });
@@ -125,6 +144,11 @@ export function toTraeRequest(body, model, ids = {}) {
   const tools = (body.tools || [])
     .filter(Boolean)
     .map((tool) => toTraeTool(tool.name, tool.description, tool.input_schema));
+
+  const instruction = toolChoiceInstruction(normalizeToolChoice(body.tool_choice));
+  if (instruction) {
+    messages.unshift({ role: 'system', content: [textBlock(instruction)] });
+  }
 
   const lastUser = [...messages].reverse().find((message) => message.role === 'user');
 
