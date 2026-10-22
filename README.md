@@ -169,7 +169,7 @@ client = OpenAI(
 本机验证通过：
 
 - **Codex CLI 0.163.0**：文本回复、shell tool 调用、reasoning summary、`/model` 目录
-- **Claude Code 2.1.308**：文本回复、Read/Bash tool 调用、图片 tool_result、thinking/effort、`/model` 发现、`count_tokens`
+- **Claude Code 2.1.308**：文本回复、Read/Bash tool 调用、图片 tool_result、thinking/effort、`/model` 发现、`count_tokens`、自动 compact
 
 Codex：
 
@@ -196,6 +196,12 @@ Claude Code 对自定义模型会提示 `unrecognized model` 并按 200k 上下�
 - Responses API 会透传模型的 `reasoning`，输出 `response.reasoning_summary_text.delta/done`；Codex 设置 `model_reasoning_summary = "detailed"` 即可看到。
 - Anthropic 的 `thinking` / `output_config.effort`、OpenAI 的 `reasoning_effort` 都会映射到上游的 `reasoning_effort`。
 - Anthropic 的 `cache_control` 会在 system / tool_result 文本块上保留。
+
+## 自动 compact
+
+Claude Code 的 auto-compact 会通过 `/v1/messages` 发送一个“只输出文本、不要调用工具”的总结请求。代理会按普通请求处理，把总结返回给 Claude Code，然后继续下一轮。
+
+已用 mock 上游验证完整链路：大上下文 → compact 请求 → summary 响应 → 第二个问题继续。测试使用 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`，避免真实消耗 100k+ tokens。
 
 ## 测试
 
