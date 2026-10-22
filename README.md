@@ -43,6 +43,46 @@ curl http://127.0.0.1:8787/healthz
 curl http://127.0.0.1:8787/v1/models
 ```
 
+## 一键安装部署
+
+```bash
+cd trae-model-proxy
+npm run install:all
+```
+
+会依次：
+
+1. 检查 Node.js >= 20 和 `traecli login` 状态
+2. 缺少 `codex` / `claude` 时安装到 `~/.local`
+3. 配置 Codex 和 Claude Code
+4. 安装并启动用户级后台服务
+5. 等待 `/healthz` 通过
+
+自定义参数：
+
+```bash
+npm run install:all -- --model trae/GPT-5.4 --effort medium --port 8787
+npm run install:all -- --no-service      # 只配置客户端
+npm run install:all -- --no-clients      # 只安装服务
+npm run install:all -- --replace         # 停止占用端口的旧进程
+```
+
+服务管理：
+
+```bash
+npm run service:status
+npm run service:start
+npm run service:stop
+npm run service:restart
+npm run service:uninstall
+```
+
+- macOS：`~/Library/LaunchAgents/com.trae.model-proxy.plist`
+  - 日志：`~/Library/Logs/trae-model-proxy.log`、`~/Library/Logs/trae-model-proxy.err.log`
+- Linux：`~/.config/systemd/user/trae-model-proxy.service`
+  - 日志：`journalctl --user -u trae-model-proxy -f`
+- 不需要 sudo，服务以当前用户身份运行，登录后自动启动。
+
 ## 一键配置 Codex 和 Claude Code
 
 ```bash
