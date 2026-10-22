@@ -108,6 +108,13 @@ export async function listModels({ refresh = false } = {}) {
   return models;
 }
 
+export const CLAUDE_ALIASES = {
+  'claude-opus-4-6': 'GPT-6.1-Sol',
+  'claude-sonnet-4-5': 'Seed-2.1-Turbo',
+  'claude-sonnet-4-6': 'GPT-5.6-Sol',
+  'claude-haiku-4-5': 'DeepSeek-V4-Flash',
+};
+
 export function claudeModelId(model) {
   return `claude-trae-${model.slug}`;
 }
@@ -118,6 +125,24 @@ export function toAnthropicModel(model) {
     display_name: `TRAE · ${model.slug}`,
     description: model.description || '',
   };
+}
+
+export function toAnthropicModels(models) {
+  const bySlug = new Map(models.map((model) => [model.slug.toLowerCase(), model]));
+  const result = [];
+  for (const [alias, slug] of Object.entries(CLAUDE_ALIASES)) {
+    const model = bySlug.get(slug.toLowerCase());
+    if (!model) continue;
+    result.push({
+      id: alias,
+      display_name: `TRAE · ${model.slug}`,
+      description: model.description || '',
+    });
+  }
+  for (const model of models) {
+    result.push(toAnthropicModel(model));
+  }
+  return result;
 }
 
 const CODEX_OPTIONAL_FIELDS = [
@@ -209,6 +234,8 @@ export async function resolveModel(modelId) {
   } else if (normalized.startsWith('anthropic/')) {
     normalized = normalized.slice('anthropic/'.length);
   }
+  const alias = CLAUDE_ALIASES[normalized.toLowerCase()];
+  if (alias) normalized = alias;
   const wanted = stripModelPrefix(normalized).toLowerCase();
   const found = models.find((model) => {
     return (

@@ -283,20 +283,27 @@ function effortBudget(effort) {
   return '32768';
 }
 
-function claudeId(model) {
+const CLAUDE_ALIAS_BY_SLUG = {
+  'GPT-6.1-Sol': 'claude-opus-4-6',
+  'Seed-2.1-Turbo': 'claude-sonnet-4-5',
+  'GPT-5.6-Sol': 'claude-sonnet-4-6',
+  'DeepSeek-V4-Flash': 'claude-haiku-4-5',
+};
+
+function claudeModelFor(model) {
   const slug = String(model).replace(/^trae\//, '');
-  return `claude-trae-${slug}`;
+  return CLAUDE_ALIAS_BY_SLUG[slug] || `claude-trae-${slug}`;
 }
 
 function claudeEnv(options) {
   return {
     ANTHROPIC_BASE_URL: options.baseUrl,
     ANTHROPIC_AUTH_TOKEN: options.apiKey || 'local-proxy',
-    ANTHROPIC_MODEL: claudeId(options.model),
-    ANTHROPIC_SMALL_FAST_MODEL: claudeId(options.smallModel),
-    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeId('trae/GPT-6.1-Sol'),
-    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeId(options.model),
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeId(options.smallModel),
+    ANTHROPIC_MODEL: claudeModelFor(options.model),
+    ANTHROPIC_SMALL_FAST_MODEL: claudeModelFor(options.smallModel),
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-6',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeModelFor(options.model),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeModelFor(options.smallModel),
     CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     MAX_THINKING_TOKENS: effortBudget(options.effort),
@@ -324,6 +331,14 @@ function configureClaude(options) {
 
   if (Object.keys(env).length) settings.env = env;
   else delete settings.env;
+
+  if (options.uninstall) {
+    if (typeof settings.model === 'string' && settings.model.startsWith('claude-')) {
+      delete settings.model;
+    }
+  } else {
+    settings.model = claudeModelFor(options.model);
+  }
 
   const next = `${JSON.stringify(settings, null, 2)}\n`;
   const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';

@@ -105,7 +105,11 @@ npm run setup -- --api-key my-secret
 Codex 和 Claude Code 都支持通过 `/model` 切换模型：
 
 - **Codex**：setup 脚本会生成 `~/.codex/trae-models.json`，并写入 `model_catalog_json`。Codex 的 `/model` 会直接列出 TRAE 模型，不依赖代理在线刷新。
-- **Claude Code**：setup 脚本会写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，Claude Code 会请求代理的 `/v1/models`。为了让 Claude Code 接受自定义模型，代理会把模型 ID 暴露为 `claude-trae-<模型名>`，例如 `claude-trae-Seed-2.1-Turbo`。
+- **Claude Code**：setup 脚本会写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，Claude Code 会请求代理的 `/v1/models`。代理会暴露两类 ID：
+  - `claude-trae-<模型名>`，例如 `claude-trae-Seed-2.1-Turbo`；
+  - Claude Code 能识别的别名：`claude-opus-4-6` → GPT-6.1-Sol、`claude-sonnet-4-5` → Seed-2.1-Turbo、`claude-sonnet-4-6` → GPT-5.6-Sol、`claude-haiku-4-5` → DeepSeek-V4-Flash。
+
+  使用 `claude-trae-*` 时 Claude Code 会提示 `unrecognized model` 并假设 200k 上下文，但调用正常；使用上面的别名不会出现该警告。
 - 推理强度：Codex 使用 `model_reasoning_effort`；Claude Code 使用 `MAX_THINKING_TOKENS` / `output_config.effort`；OpenAI 客户端使用 `reasoning_effort`。
 
 ## 排队信息

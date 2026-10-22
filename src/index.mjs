@@ -5,7 +5,7 @@ import { authStatus } from './auth.mjs';
 import {
   listModels,
   resolveModel,
-  toAnthropicModel,
+  toAnthropicModels,
   toCodexCatalog,
   toOpenAiModel,
 } from './models.mjs';
@@ -86,11 +86,12 @@ async function route(req, res) {
       `[proxy] GET ${url.pathname} anthropic=${Boolean(req.headers['anthropic-version'])} -> ${models.length} models`,
     );
     if (req.headers['anthropic-version']) {
+      const data = toAnthropicModels(models);
       sendJson(res, 200, {
-        data: models.map(toAnthropicModel),
+        data,
         has_more: false,
-        first_id: models.length ? toAnthropicModel(models[0]).id : null,
-        last_id: models.length ? toAnthropicModel(models[models.length - 1]).id : null,
+        first_id: data.length ? data[0].id : null,
+        last_id: data.length ? data[data.length - 1].id : null,
       });
       return;
     }
