@@ -46,6 +46,8 @@ export const config = {
   authFile: process.env.TRAE_AUTH_FILE || path.join(traeCliHome, 'auth.json'),
   cliBin: process.env.TRAECLI_BIN || 'traecli',
   verbose: bool(process.env.PROXY_VERBOSE, false),
+  logFormat: process.env.PROXY_LOG_FORMAT || 'text',
+  allowInsecureBind: bool(process.env.PROXY_ALLOW_INSECURE_BIND, false),
 };
 
 export function isModelId(value) {

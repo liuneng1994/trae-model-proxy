@@ -2,6 +2,9 @@ import crypto from 'node:crypto';
 import { config } from '../config.mjs';
 import { getAuthHeaders } from '../auth.mjs';
 import { parseSSE } from './sse.mjs';
+import { inc } from '../util/metrics.mjs';
+import { setQueueState } from '../util/state.mjs';
+import { parseQueueNotice } from '../util/queue.mjs';
 
 export class UpstreamError extends Error {
   constructor(message, { status = 502, code = null, retryable = false, cause } = {}) {
@@ -170,9 +173,11 @@ async function* streamChatOnce(params, { signal } = {}) {
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    inc('trae_upstream_requests_total', { status: String(response.status) });
   } catch (err) {
     clearTimeout(timeout);
     if (signal) signal.removeEventListener('abort', onAbort);
+    inc('trae_upstream_errors_total', { code: 'network' });
     throw new UpstreamError(`Failed to reach TRAE model gateway: ${err.message}`, {
       status: 502,
       retryable: true,
@@ -184,6 +189,7 @@ async function* streamChatOnce(params, { signal } = {}) {
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const status = response.status;
+      inc('trae_upstream_errors_total', { code: String(status) });
       throw new UpstreamError(
         status === 401 || status === 403
           ? 'TRAE rejected the access token. Run `traecli login` and retry.'
@@ -219,13 +225,18 @@ async function* streamChatOnce(params, { signal } = {}) {
       }
 
       if (event === 'progress_notice') {
-        const message = typeof data === 'string' ? data : JSON.stringify(payload);
-        yield { type: 'queue', message, raw: message };
+        const queue = parseQueueNotice(
+          typeof data === 'string' ? data : JSON.stringify(payload),
+        );
+        inc('trae_queue_notices_total', { phase: queue.phase });
+        setQueueState(queue);
+        yield { type: 'queue', ...queue };
         continue;
       }
 
       if (event === 'error') {
         const code = payload.code ?? null;
+        inc('trae_upstream_errors_total', { code: String(code) });
         const message = payload.message || payload.error || 'TRAE upstream error';
         const status = code === 3004 ? 429 : code === 4019 ? 403 : 502;
         throw new UpstreamError(message, {
@@ -316,6 +327,9 @@ export async function* streamChat(params, { signal } = {}) {
       if (signal?.aborted) throw err;
       const retryable = err?.retryable === true;
       if (retryable && !hasOutput && attempt < attempts) {
+        inc('trae_upstream_retries_total', {
+          code: String(err.code || err.status || 'network'),
+        });
         const delay = retryDelayMs(attempt);
         if (config.verbose) {
           console.warn(`[upstream] retry ${attempt}/${attempts} in ${delay}ms: ${err.message}`);

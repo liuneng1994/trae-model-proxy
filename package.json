@@ -13,6 +13,7 @@
     "setup:codex": "node scripts/setup-clients.mjs --codex-only",
     "setup:claude": "node scripts/setup-clients.mjs --claude-only",
     "setup:uninstall": "node scripts/setup-clients.mjs --uninstall",
+    "doctor": "node scripts/doctor.mjs",
     "capture": "node scripts/capture.mjs",
     "test": "node --test test/*.test.mjs"
   }

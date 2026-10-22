@@ -156,3 +156,48 @@ test('Anthropic converts tool_use, tool_result, cache_control, and tool_choice',
   assert.equal(request.maxTokens, 77);
   assert.equal(request.reasoningEffort, 'medium');
 });
+
+test('Anthropic keeps image blocks inside tool_result', () => {
+  const request = anthropicToTrae(
+    {
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'look at the image' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'call_img', name: 'Read', input: { file_path: '/x.png' } },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'call_img',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: 'image/png',
+                    data: 'iVBORw0KGgo=',
+                  },
+                },
+                { type: 'text', text: 'image loaded' },
+              ],
+            },
+          ],
+        },
+      ],
+      tools: [{ name: 'Read', input_schema: { type: 'object' } }],
+      max_tokens: 64,
+    },
+    model,
+  );
+
+  const toolMessage = request.messages.find((message) => message.role === 'tool');
+  assert.equal(toolMessage.content[0].type, 'image_url');
+  assert.ok(toolMessage.content[0].image_url.url.startsWith('data:image/png;base64,'));
+  assert.equal(toolMessage.content[1].text, 'image loaded');
+});

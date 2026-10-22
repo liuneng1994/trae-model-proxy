@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import http from 'node:http';
 import { config } from './config.mjs';
 import { authStatus } from './auth.mjs';
@@ -18,6 +19,10 @@ import {
   sendJson,
   writeCors,
 } from './util/http.mjs';
+import { inc, addGauge, renderPrometheus } from './util/metrics.mjs';
+import { info, error as logError } from './util/logger.mjs';
+import { getQueueState } from './util/state.mjs';
+import { safeEqual, isLoopbackHost } from './util/security.mjs';
 
 function requestIds(req) {
   const sessionId =
@@ -34,8 +39,8 @@ function requestIds(req) {
 function authorized(req) {
   if (!config.apiKey) return true;
   const bearer = req.headers.authorization || '';
-  if (bearer === `Bearer ${config.apiKey}`) return true;
-  return req.headers['x-api-key'] === config.apiKey;
+  const token = bearer.startsWith('Bearer ') ? bearer.slice(7) : '';
+  return safeEqual(token, config.apiKey) || safeEqual(req.headers['x-api-key'], config.apiKey);
 }
 
 function estimateTokens(body) {
@@ -48,6 +53,12 @@ function estimateTokens(body) {
 
 async function route(req, res) {
   writeCors(res);
+  const requestId =
+    typeof req.headers['x-request-id'] === 'string'
+      ? req.headers['x-request-id']
+      : `req_${crypto.randomUUID()}`;
+  res.setHeader('x-request-id', requestId);
+  res.setHeader('x-content-type-options', 'nosniff');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -56,6 +67,12 @@ async function route(req, res) {
   }
 
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+  if (req.method === 'GET' && url.pathname === '/metrics') {
+    res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
+    res.end(renderPrometheus());
+    return;
+  }
 
   if (req.method === 'GET' && url.pathname === '/healthz') {
     const auth = authStatus();
@@ -72,22 +89,26 @@ async function route(req, res) {
       models: models.length,
       modelError,
       upstream: config.chatUrl,
+      queue: getQueueState(),
     });
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/models/codex') {
     const models = await listModels();
-    console.log(`[proxy] GET ${url.pathname} -> ${models.length} models`);
+    info('models.list', { requestId, path: url.pathname, count: models.length });
     sendJson(res, 200, toCodexCatalog(models));
     return;
   }
 
   if (req.method === 'GET' && (url.pathname === '/v1/models' || url.pathname === '/models')) {
     const models = await listModels();
-    console.log(
-      `[proxy] GET ${url.pathname} anthropic=${Boolean(req.headers['anthropic-version'])} -> ${models.length} models`,
-    );
+    info('models.list', {
+      requestId,
+      path: url.pathname,
+      anthropic: Boolean(req.headers['anthropic-version']),
+      count: models.length,
+    });
     if (req.headers['anthropic-version']) {
       const data = toAnthropicModels(models);
       sendJson(res, 200, {
@@ -111,6 +132,13 @@ async function route(req, res) {
 
   if (!authorized(req)) {
     sendError(res, 401, 'Invalid proxy API key', { type: 'authentication_error' });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/models/refresh') {
+    const models = await listModels({ refresh: true });
+    info('models.refresh', { requestId, count: models.length });
+    sendJson(res, 200, { ok: true, models: models.length });
     return;
   }
 
@@ -165,18 +193,27 @@ async function route(req, res) {
   res.on('close', onClientClose);
   const signal = controller.signal;
   const started = Date.now();
-  console.log(`[proxy] ${req.method} ${url.pathname} model=${modelId} stream=${Boolean(body.stream)}`);
+  inc('proxy_model_requests_total', { model: model.slug, protocol });
+  addGauge('proxy_active_requests', {}, 1);
+  info('request.start', {
+    requestId,
+    method: req.method,
+    path: url.pathname,
+    model: modelId,
+    stream: Boolean(body.stream),
+  });
   if (config.verbose) {
     const effort =
       body.reasoning_effort ||
       body.reasoning?.effort ||
       body.output_config?.effort ||
       (body.thinking?.budget_tokens ? `budget:${body.thinking.budget_tokens}` : 'default');
-    console.log(
-      `[proxy] detail tools=${(body.tools || []).length} effort=${effort} max_tokens=${
-        body.max_tokens || body.max_output_tokens || 'default'
-      }`,
-    );
+    info('request.detail', {
+      requestId,
+      tools: (body.tools || []).length,
+      effort,
+      maxTokens: body.max_tokens || body.max_output_tokens || 'default',
+    });
   }
 
   try {
@@ -191,7 +228,16 @@ async function route(req, res) {
       if (!body.stream) sendJson(res, 200, payload);
     }
   } catch (err) {
-    if (config.verbose) console.error(`[proxy] error: ${err.stack || err.message}`);
+    inc('proxy_request_errors_total', {
+      protocol,
+      status: String(err.status || 502),
+    });
+    logError('request.error', {
+      requestId,
+      path: url.pathname,
+      status: err.status || 502,
+      message: err.message,
+    });
     if (!res.headersSent) {
       const status = err.status || 502;
       sendError(res, status, err.message, {
@@ -205,13 +251,20 @@ async function route(req, res) {
   } finally {
     clearTimeout(timeout);
     res.off('close', onClientClose);
-    console.log(`[proxy] done ${url.pathname} in ${Date.now() - started}ms`);
+    addGauge('proxy_active_requests', {}, -1);
+    inc('proxy_requests_total', { protocol, status: String(res.statusCode || 0) });
+    info('request.done', {
+      requestId,
+      path: url.pathname,
+      status: res.statusCode,
+      durationMs: Date.now() - started,
+    });
   }
 }
 
 const server = http.createServer((req, res) => {
   route(req, res).catch((err) => {
-    console.error(`[proxy] unhandled error: ${err.stack || err.message}`);
+    logError('request.unhandled', { message: err.stack || err.message });
     if (!res.headersSent) {
       sendError(res, 500, err.message || 'Internal error');
     } else if (!res.writableEnded) {
@@ -220,11 +273,25 @@ const server = http.createServer((req, res) => {
   });
 });
 
+if (!isLoopbackHost(config.host) && !config.apiKey && !config.allowInsecureBind) {
+  logError('startup.refused', {
+    reason: 'non-loopback bind without PROXY_API_KEY',
+    host: config.host,
+    hint: 'Set PROXY_API_KEY or PROXY_ALLOW_INSECURE_BIND=1',
+  });
+  process.exit(1);
+}
+
+setGauge('proxy_active_requests', {}, 0);
+
 server.listen(config.port, config.host, () => {
-  console.log(`[proxy] listening on http://${config.host}:${config.port}`);
-  console.log(`[proxy] chat upstream: ${config.chatUrl}`);
-  console.log(`[proxy] auth file: ${config.authFile}`);
-  console.log(`[proxy] proxy api key: ${config.apiKey ? 'enabled' : 'disabled (localhost only)'}`);
+  info('startup.listening', {
+    url: `http://${config.host}:${config.port}`,
+    upstream: config.chatUrl,
+    authFile: config.authFile,
+    proxyAuth: config.apiKey ? 'enabled' : 'disabled',
+    logFormat: config.logFormat,
+  });
 });
 
 function shutdown() {

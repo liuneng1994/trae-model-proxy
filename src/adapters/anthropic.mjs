@@ -48,6 +48,26 @@ function anthropicContentBlocks(content) {
   return blocks.length ? blocks : [textBlock('')];
 }
 
+function anthropicToolResultBlocks(content) {
+  if (typeof content === 'string') return [textBlock(content)];
+  if (!Array.isArray(content)) return [textBlock('')];
+  const blocks = [];
+  for (const part of content) {
+    if (!part) continue;
+    if (part.type === 'text') {
+      const block = textBlock(part.text || '');
+      if (part.cache_control) block.cache_control = part.cache_control;
+      blocks.push(block);
+    } else if (part.type === 'image') {
+      const image = imageBlock(part.source);
+      if (image) blocks.push(image);
+    } else if (typeof part.text === 'string') {
+      blocks.push(textBlock(part.text));
+    }
+  }
+  return blocks.length ? blocks : [textBlock('')];
+}
+
 function normalizeToolChoice(choice) {
   if (!choice || typeof choice !== 'object') return undefined;
   if (choice.type === 'auto') return 'auto';
@@ -126,11 +146,13 @@ export function toTraeRequest(body, model, ids = {}) {
         if (textBlocks.length) {
           messages.push({ role: 'user', content: textBlocks.splice(0) });
         }
-        const toolBlock = textBlock(asText(part.content));
-        if (part.cache_control) toolBlock.cache_control = part.cache_control;
+        const toolContent = anthropicToolResultBlocks(part.content);
+        if (part.cache_control && toolContent.length) {
+          toolContent[toolContent.length - 1].cache_control = part.cache_control;
+        }
         messages.push({
           role: 'tool',
-          content: [toolBlock],
+          content: toolContent,
           name: toolNames.get(part.tool_use_id) || 'tool',
           tool_call_id: part.tool_use_id || '',
         });
@@ -233,6 +255,8 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
   let thinkingOpen = false;
   let outputTokens = 0;
   let inputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
   let stopReason = 'end_turn';
   const toolBlocks = new Map();
 
@@ -361,6 +385,8 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
         case 'usage':
           inputTokens = event.usage.promptTokens;
           outputTokens = event.usage.completionTokens;
+          cacheReadTokens = event.usage.cacheReadTokens || 0;
+          cacheCreationTokens = event.usage.cacheCreationTokens || 0;
           break;
         case 'done':
           stopReason = mapStopReasonToAnthropic(event.finishReason);
@@ -382,8 +408,8 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cacheReadTokens,
+        cache_creation_input_tokens: cacheCreationTokens,
       },
     });
     send('message_stop', { type: 'message_stop' });

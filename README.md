@@ -168,8 +168,8 @@ client = OpenAI(
 
 本机验证通过：
 
-- **Codex CLI 0.163.0**：文本回复、shell tool 调用
-- **Claude Code 2.1.308**：文本回复、Read tool 调用
+- **Codex CLI 0.163.0**：文本回复、shell tool 调用、reasoning summary、`/model` 目录
+- **Claude Code 2.1.308**：文本回复、Read/Bash tool 调用、图片 tool_result、thinking/effort、`/model` 发现、`count_tokens`
 
 Codex：
 
@@ -203,7 +203,20 @@ Claude Code 对自定义模型会提示 `unrecognized model` 并按 200k 上下�
 npm test
 ```
 
-当前覆盖 SSE 分片解析、三种协议的请求转换、模型/别名解析、Codex 目录生成、429 重试。
+当前覆盖 SSE 分片解析、三种协议的请求转换、模型/别名解析、Codex 目录生成、429 重试、队列解析、指标和安全比较。
+
+## 可观测性
+
+```bash
+curl http://127.0.0.1:8787/healthz   # 登录、模型数、最近队列状态
+curl http://127.0.0.1:8787/metrics   # Prometheus 文本指标
+curl -X POST http://127.0.0.1:8787/v1/models/refresh
+npm run doctor                        # 代理、Codex、Claude 配置体检
+```
+
+- 每个响应带 `x-request-id`。
+- `PROXY_LOG_FORMAT=json` 可输出 JSON 日志。
+- 非 loopback 监听且未设置 `PROXY_API_KEY` 时会拒绝启动，除非显式设置 `PROXY_ALLOW_INSECURE_BIND=1`。
 
 ## 配置项
 
@@ -221,6 +234,8 @@ npm test
 | `TRAE_MAX_ATTEMPTS` | `3` | 上游 429/5xx 最大尝试次数 |
 | `TRAE_RETRY_BASE_MS` | `500` | 重试退避基数 |
 | `TRAE_RETRY_MAX_MS` | `10000` | 单次重试最大等待 |
+| `PROXY_LOG_FORMAT` | `text` | `text` 或 `json` |
+| `PROXY_ALLOW_INSECURE_BIND` | `0` | 允许非 loopback 且无 API key 启动 |
 | `PROXY_VERBOSE` | `0` | 输出调试日志 |
 
 ## 协议抓包（开发用）
@@ -237,7 +252,7 @@ TRAE_API_BASE_URL=http://127.0.0.1:8788 traecli exec -m Seed-2.1-Turbo "reply OK
 ## 已知限制
 
 - TRAE 的 `llm_raw_chat` 是内部协议，TRAE CLI 升级后可能需要重新抓包调整字段。
-- 文本、reasoning、tool calls 已支持；图片输入按 `image_url` 尽力透传，未做完整验证。
+- 文本、reasoning、tool calls、图片 tool_result 已支持（上游要求图片至少 14px）；普通文档/PDF 内容未做转换。
 - `tool_choice` 会转换成系统指令，不是原生上游字段；强制工具调用的确定性弱于原生支持。
 - `/v1/messages/count_tokens` 是启发式估算，不是精确 tokenizer。
 - Access token 过期后需要手动执行 `traecli login`，代理不会自动刷新。
