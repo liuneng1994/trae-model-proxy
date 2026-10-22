@@ -1,0 +1,15 @@
+{
+  "name": "trae-model-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Expose TRAE CLI models through OpenAI-compatible and Anthropic-compatible APIs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "capture": "node scripts/capture.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

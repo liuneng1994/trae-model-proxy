@@ -1,0 +1,307 @@
+import crypto from 'node:crypto';
+import { config } from '../config.mjs';
+import { getAuthHeaders } from '../auth.mjs';
+import { parseSSE } from './sse.mjs';
+
+export class UpstreamError extends Error {
+  constructor(message, { status = 502, code = null, retryable = false, cause } = {}) {
+    super(message);
+    this.name = 'UpstreamError';
+    this.status = status;
+    this.code = code;
+    this.retryable = retryable;
+    if (cause) this.cause = cause;
+  }
+}
+
+export function newId(prefix = '') {
+  return `${prefix}${crypto.randomUUID()}`;
+}
+
+export function newTraceparent() {
+  const traceId = crypto.randomBytes(16).toString('hex');
+  const spanId = crypto.randomBytes(8).toString('hex');
+  return `00-${traceId}-${spanId}-01`;
+}
+
+export function mapFinishReason(reason) {
+  switch (reason) {
+    case 'tool_calls':
+    case 'function_call':
+      return 'tool_calls';
+    case 'length':
+      return 'length';
+    case 'content_filter':
+      return 'content_filter';
+    case 'stop':
+    case 'stop_sequence':
+    case null:
+    case undefined:
+      return 'stop';
+    default:
+      return String(reason);
+  }
+}
+
+function mapUsage(raw = {}) {
+  const prompt = raw.prompt_tokens ?? 0;
+  const completion = raw.completion_tokens ?? 0;
+  return {
+    promptTokens: prompt,
+    completionTokens: completion,
+    totalTokens: raw.total_tokens ?? prompt + completion,
+    cacheReadTokens: raw.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: raw.cache_creation_input_tokens ?? 0,
+    reasoningTokens: raw.reasoning_tokens ?? 0,
+  };
+}
+
+function buildHeaders() {
+  return {
+    version: config.version,
+    'x-agent-flag': '1',
+    'x-app-id': config.appId,
+    'x-ide-function': config.ideFunction,
+    'x-ide-version-code': config.ideVersionCode,
+    'x-flow-traceparent': newTraceparent(),
+    accept: 'text/event-stream',
+    'content-type': 'application/json',
+    originator: config.originator,
+    'user-agent': config.userAgent,
+    ...getAuthHeaders(),
+  };
+}
+
+function buildBody(params) {
+  return {
+    extra_info: JSON.stringify({ tool_wire_contract: 'preserve_v1' }),
+    config_name: params.model.configName,
+    model_name: params.model.backendModel,
+    user_input: params.userInput || '',
+    messages: params.messages,
+    session_id: params.sessionId || newId(),
+    conversation_id: params.conversationId || newId(),
+    is_preset: true,
+    tools: params.tools || [],
+    max_tokens: params.maxTokens || config.defaultMaxTokens,
+    reasoning_effort: params.reasoningEffort || config.defaultReasoningEffort,
+    parallel_tool_calls: params.parallelToolCalls !== false,
+    access_type: 4,
+  };
+}
+
+function parseToolCalls(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(Boolean).map((call, fallbackIndex) => {
+    const fn = call.function_call || call.function || {};
+    return {
+      index: Number.isInteger(call.index) ? call.index : fallbackIndex,
+      id: call.id || '',
+      type: call.type || 'function',
+      name: fn.name || '',
+      arguments: fn.arguments ?? fn.partial_arguments ?? '',
+    };
+  });
+}
+
+/**
+ * Streams normalized events from the TRAE raw-chat endpoint.
+ *
+ * Yields:
+ *   { type: 'metadata', metadata }
+ *   { type: 'text', delta }
+ *   { type: 'reasoning', delta }
+ *   { type: 'tool_start', index, id, name }
+ *   { type: 'tool_args', index, delta }
+ *   { type: 'tool_end', index, id, name }
+ *   { type: 'usage', usage }
+ *   { type: 'done', finishReason }
+ */
+export async function* streamChat(params, { signal } = {}) {
+  const body = buildBody(params);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('upstream timeout')), config.requestTimeoutMs);
+  const onAbort = () => controller.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  let response;
+  try {
+    response = await fetch(config.chatUrl, {
+      method: 'POST',
+      headers: buildHeaders(),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (signal) signal.removeEventListener('abort', onAbort);
+    throw new UpstreamError(`Failed to reach TRAE model gateway: ${err.message}`, {
+      status: 502,
+      cause: err,
+    });
+  }
+
+  try {
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      const status = response.status;
+      throw new UpstreamError(
+        status === 401 || status === 403
+          ? 'TRAE rejected the access token. Run `traecli login` and retry.'
+          : `TRAE model gateway returned HTTP ${status}: ${text.slice(0, 500)}`,
+        { status: status === 401 || status === 403 ? 401 : 502, code: status },
+      );
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('text/event-stream')) {
+      const text = await response.text().catch(() => '');
+      throw new UpstreamError(`Unexpected upstream response: ${text.slice(0, 500)}`);
+    }
+
+    const activeTools = new Map();
+    let sawDone = false;
+
+    for await (const { event, data } of parseSSE(response.body)) {
+      let payload;
+      try {
+        payload = data ? JSON.parse(data) : {};
+      } catch {
+        payload = { raw: data };
+      }
+
+      if (event === 'metadata') {
+        yield { type: 'metadata', metadata: payload };
+        continue;
+      }
+
+      if (event === 'error') {
+        const code = payload.code ?? null;
+        const message = payload.message || payload.error || 'TRAE upstream error';
+        const status = code === 3004 ? 429 : code === 4019 ? 403 : 502;
+        throw new UpstreamError(message, {
+          status,
+          code,
+          retryable: status === 429 || status >= 500,
+        });
+      }
+
+      if (event === 'output') {
+        if (typeof payload.reasoning_content === 'string' && payload.reasoning_content) {
+          yield { type: 'reasoning', delta: payload.reasoning_content };
+        }
+        if (typeof payload.response === 'string' && payload.response) {
+          yield { type: 'text', delta: payload.response };
+        }
+        for (const call of parseToolCalls(payload.tool_calls)) {
+          const existing = activeTools.get(call.index);
+          if (call.id || call.name) {
+            if (existing) {
+              yield { type: 'tool_end', index: call.index, id: existing.id, name: existing.name };
+            }
+            activeTools.set(call.index, { id: call.id, name: call.name });
+            yield { type: 'tool_start', index: call.index, id: call.id, name: call.name };
+          }
+          if (call.arguments) {
+            if (!activeTools.has(call.index)) {
+              activeTools.set(call.index, { id: call.id, name: call.name });
+              yield { type: 'tool_start', index: call.index, id: call.id, name: call.name };
+            }
+            yield { type: 'tool_args', index: call.index, delta: call.arguments };
+          }
+        }
+        continue;
+      }
+
+      if (event === 'token_usage') {
+        yield { type: 'usage', usage: mapUsage(payload) };
+        continue;
+      }
+
+      if (event === 'done') {
+        for (const [index, call] of activeTools) {
+          yield { type: 'tool_end', index, id: call.id, name: call.name };
+        }
+        activeTools.clear();
+        yield { type: 'done', finishReason: mapFinishReason(payload.finish_reason) };
+        sawDone = true;
+        continue;
+      }
+
+      // timing_cost, extra_info and future events are intentionally ignored.
+    }
+
+    if (!sawDone) {
+      for (const [index, call] of activeTools) {
+        yield { type: 'tool_end', index, id: call.id, name: call.name };
+      }
+      yield { type: 'done', finishReason: 'stop' };
+    }
+  } finally {
+    clearTimeout(timeout);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+export async function completeChat(params, { signal } = {}) {
+  let text = '';
+  let reasoning = '';
+  let finishReason = 'stop';
+  let usage = null;
+  let metadata = null;
+  const toolCalls = new Map();
+
+  for await (const event of streamChat(params, { signal })) {
+    switch (event.type) {
+      case 'metadata':
+        metadata = event.metadata;
+        break;
+      case 'text':
+        text += event.delta;
+        break;
+      case 'reasoning':
+        reasoning += event.delta;
+        break;
+      case 'tool_start':
+        toolCalls.set(event.index, {
+          index: event.index,
+          id: event.id,
+          type: 'function',
+          name: event.name,
+          arguments: '',
+        });
+        break;
+      case 'tool_args': {
+        let call = toolCalls.get(event.index);
+        if (!call) {
+          call = { index: event.index, id: '', type: 'function', name: '', arguments: '' };
+          toolCalls.set(event.index, call);
+        }
+        call.arguments += event.delta;
+        break;
+      }
+      case 'tool_end':
+        break;
+      case 'usage':
+        usage = event.usage;
+        break;
+      case 'done':
+        finishReason = event.finishReason;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return {
+    text,
+    reasoning,
+    finishReason,
+    usage,
+    metadata,
+    toolCalls: [...toolCalls.values()].sort((a, b) => a.index - b.index),
+  };
+}
