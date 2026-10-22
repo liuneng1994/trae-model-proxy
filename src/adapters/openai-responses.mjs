@@ -4,6 +4,7 @@ import {
   asText,
   ensureToolId,
   mapUsageToResponses,
+  normalizeReasoningEffort,
   textBlock,
   toTraeTool,
 } from './common.mjs';
@@ -93,7 +94,7 @@ export function toTraeRequest(body, model, ids = {}) {
     tools,
     userInput: lastUserInput(messages),
     maxTokens: body.max_output_tokens ?? config.defaultMaxTokens,
-    reasoningEffort: body.reasoning?.effort || config.defaultReasoningEffort,
+    reasoningEffort: normalizeReasoningEffort(body.reasoning?.effort),
     parallelToolCalls: body.parallel_tool_calls !== false,
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,

@@ -91,6 +91,17 @@ export function mapStopReasonToAnthropic(reason) {
   }
 }
 
+export function normalizeReasoningEffort(value, fallback = config.defaultReasoningEffort) {
+  if (!value) return fallback;
+  const effort = String(value).toLowerCase();
+  if (effort === 'none' || effort === 'off' || effort === 'minimal') return 'low';
+  if (effort === 'low') return 'low';
+  if (effort === 'medium' || effort === 'mid') return 'medium';
+  if (effort === 'high') return 'high';
+  if (effort === 'xhigh' || effort === 'ultra') return 'high';
+  return fallback;
+}
+
 export function reasoningEffortFromBudget(budgetTokens) {
   if (!budgetTokens || !Number.isFinite(budgetTokens)) return config.defaultReasoningEffort;
   if (budgetTokens <= 2048) return 'low';

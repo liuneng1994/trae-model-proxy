@@ -124,6 +124,18 @@ async function route(req, res) {
   const signal = AbortSignal.timeout(config.requestTimeoutMs);
   const started = Date.now();
   console.log(`[proxy] ${req.method} ${url.pathname} model=${modelId} stream=${Boolean(body.stream)}`);
+  if (config.verbose) {
+    const effort =
+      body.reasoning_effort ||
+      body.reasoning?.effort ||
+      body.output_config?.effort ||
+      (body.thinking?.budget_tokens ? `budget:${body.thinking.budget_tokens}` : 'default');
+    console.log(
+      `[proxy] detail tools=${(body.tools || []).length} effort=${effort} max_tokens=${
+        body.max_tokens || body.max_output_tokens || 'default'
+      }`,
+    );
+  }
 
   try {
     if (url.pathname === '/v1/chat/completions') {

@@ -5,6 +5,7 @@ import {
   ensureToolId,
   lastUserText,
   mapUsageToOpenAi,
+  normalizeReasoningEffort,
   textBlock,
   toTraeTool,
 } from './common.mjs';
@@ -86,8 +87,9 @@ export function toTraeRequest(body, model, ids = {}) {
     tools,
     userInput: lastUserText(messages),
     maxTokens: body.max_tokens ?? body.max_completion_tokens ?? config.defaultMaxTokens,
-    reasoningEffort:
-      body.reasoning_effort || body.reasoning?.effort || config.defaultReasoningEffort,
+    reasoningEffort: normalizeReasoningEffort(
+      body.reasoning_effort || body.reasoning?.effort,
+    ),
     parallelToolCalls: body.parallel_tool_calls !== false,
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,

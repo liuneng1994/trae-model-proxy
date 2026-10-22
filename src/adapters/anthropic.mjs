@@ -5,6 +5,7 @@ import {
   ensureToolId,
   mapStopReasonToAnthropic,
   mapUsageToAnthropic,
+  normalizeReasoningEffort,
   reasoningEffortFromBudget,
   textBlock,
   toTraeTool,
@@ -133,9 +134,13 @@ export function toTraeRequest(body, model, ids = {}) {
     tools,
     userInput: asText(lastUser?.content),
     maxTokens: body.max_tokens ?? config.defaultMaxTokens,
-    reasoningEffort: body.thinking?.type === 'enabled'
-      ? reasoningEffortFromBudget(body.thinking.budget_tokens)
-      : config.defaultReasoningEffort,
+    reasoningEffort: body.output_config?.effort
+      ? normalizeReasoningEffort(body.output_config.effort)
+      : body.thinking?.type === 'enabled'
+        ? reasoningEffortFromBudget(body.thinking.budget_tokens)
+        : body.thinking?.type === 'adaptive'
+          ? normalizeReasoningEffort(body.output_config?.effort || 'medium')
+          : config.defaultReasoningEffort,
     parallelToolCalls: true,
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,

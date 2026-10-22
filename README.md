@@ -43,6 +43,63 @@ curl http://127.0.0.1:8787/healthz
 curl http://127.0.0.1:8787/v1/models
 ```
 
+## 一键配置 Codex 和 Claude Code
+
+```bash
+cd trae-model-proxy
+npm run setup
+```
+
+默认会：
+
+- 写入 `~/.codex/config.toml`，注册 `trae_proxy` provider
+- 合并写入 `~/.claude/settings.json` 的 `env`
+- 默认模型 `trae/Seed-2.1-Turbo`
+- 默认推理强度 `high`
+- 修改前自动备份原配置
+
+自定义模型和推理强度：
+
+```bash
+npm run setup -- --model trae/GPT-5.4 --effort medium
+npm run setup -- --model trae/DeepSeek-V4.1-Flash --small-model trae/DeepSeek-V4-Flash
+```
+
+只配置其中一个：
+
+```bash
+npm run setup:codex
+npm run setup:claude
+```
+
+预览或卸载：
+
+```bash
+npm run setup -- --dry-run
+npm run setup:uninstall
+```
+
+如果设置了代理 API key：
+
+```bash
+npm run setup -- --api-key my-secret
+# Codex 需要按提示 export TRAE_PROXY_API_KEY=my-secret
+```
+
+支持的选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `--model <id>` | 两个客户端使用的模型 |
+| `--small-model <id>` | Claude Code 的 small/fast 模型 |
+| `--effort low\|medium\|high` | 推理强度 |
+| `--base-url <url>` | 代理地址，默认 `http://127.0.0.1:8787` |
+| `--api-key <key>` | 可选的代理 API key |
+| `--codex-only` / `--claude-only` | 只配置一个客户端 |
+| `--uninstall` | 移除代理配置 |
+| `--dry-run` | 只打印，不写文件 |
+| `--force` | 覆盖冲突的 Codex 顶层配置 |
+
 ## 客户端配置
 
 ### Claude Code
