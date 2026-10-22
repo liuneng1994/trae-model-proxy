@@ -166,7 +166,15 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   }
 
   startSSE(res);
-  const send = (event, data) => writeSSEEvent(res, event, data);
+  let sequenceNumber = 0;
+  const sendRaw = (event, data) => writeSSEEvent(res, event, data);
+  const send = (event, payload, { wrapResponse = false } = {}) => {
+    sendRaw(event, {
+      type: event,
+      ...(wrapResponse ? { response: payload } : payload),
+      sequence_number: sequenceNumber++,
+    });
+  };
 
   let messageId = null;
   let messageOutputIndex = null;
@@ -175,16 +183,15 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   let usage = null;
   const toolItems = new Map();
 
-  send(
-    'response.created',
-    responseObject({
-      id: responseId,
-      createdAt,
-      model: body.model,
-      status: 'in_progress',
-      output: [],
-    }),
-  );
+  const inProgress = responseObject({
+    id: responseId,
+    createdAt,
+    model: body.model,
+    status: 'in_progress',
+    output: [],
+  });
+  send('response.created', inProgress, { wrapResponse: true });
+  send('response.in_progress', inProgress, { wrapResponse: true });
 
   const ensureMessage = () => {
     if (messageId) return;
@@ -313,6 +320,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
         output,
         usage: mapUsageToResponses(usage),
       }),
+      { wrapResponse: true },
     );
     endSSE(res);
   } catch (err) {
@@ -327,6 +335,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           output: [],
           error: { code: err.code || 'upstream_error', message: err.message },
         }),
+        { wrapResponse: true },
       );
       endSSE(res);
     }

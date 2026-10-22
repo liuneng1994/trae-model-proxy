@@ -86,6 +86,32 @@ client = OpenAI(
 )
 ```
 
+## 已验证
+
+本机验证通过：
+
+- **Codex CLI 0.163.0**：文本回复、shell tool 调用
+- **Claude Code 2.1.308**：文本回复、Read tool 调用
+
+Codex：
+
+```bash
+CODEX_HOME=/tmp/codex-trae-proxy \
+TRAE_PROXY_API_KEY=local-proxy \
+codex exec -s read-only "Reply with exactly: CODEX_OK"
+```
+
+Claude Code：
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 \
+ANTHROPIC_AUTH_TOKEN=local-proxy \
+ANTHROPIC_MODEL=trae/Seed-2.1-Turbo \
+claude -p "Reply with exactly: CLAUDE_OK"
+```
+
+Claude Code 对自定义模型会提示 `unrecognized model` 并按 200k 上下文处理，这是客户端的模型元数据提示，不影响调用。需要工具调用时加 `--allowedTools "Read"` 等参数。
+
 ## 配置项
 
 | 环境变量 | 默认值 | 说明 |
