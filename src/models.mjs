@@ -83,6 +83,17 @@ export async function listModels({ refresh = false } = {}) {
   let models = [];
   try {
     models = await loadFromCli();
+    // The CLI catalog is compact; merge the richer cached catalog (model_messages,
+    // reasoning levels, harness metadata) when the slugs match.
+    const cached = loadFromCaches();
+    const bySlug = new Map(cached.map((model) => [model.slug.toLowerCase(), model]));
+    for (const model of models) {
+      const richer = bySlug.get(model.slug.toLowerCase());
+      if (!richer) continue;
+      model.raw = { ...richer.raw, ...model.raw };
+      model.description = model.description || richer.description;
+      model.contextWindow = model.contextWindow || richer.contextWindow;
+    }
   } catch (err) {
     if (config.verbose) console.warn(`[models] traecli models failed: ${err.message}`);
     models = loadFromCaches();
@@ -97,9 +108,108 @@ export async function listModels({ refresh = false } = {}) {
   return models;
 }
 
+export function claudeModelId(model) {
+  return `claude-trae-${model.slug}`;
+}
+
+export function toAnthropicModel(model) {
+  return {
+    id: claudeModelId(model),
+    display_name: `TRAE · ${model.slug}`,
+    description: model.description || '',
+  };
+}
+
+const CODEX_OPTIONAL_FIELDS = [
+  'prefer_websockets',
+  'minimal_client_version',
+  'availability_nux',
+  'upgrade',
+  'service_tiers',
+  'additional_speed_tiers',
+  'default_service_tier',
+  'model_specialty',
+  'multi_agent_reasoning_effort',
+  'supports_reasoning_effort_updates',
+  'guardian',
+  'node_repl_auto_review_required',
+  'node_repl_disabled',
+  'requires_sandboxed_review',
+  'auto_review_model_override',
+  'comp_hash',
+  'experimental_supported_tools',
+  'include_apps_usage_instructions',
+  'include_plugin_usage_instructions',
+  'supports_experimental_context',
+  'supports_search_tool',
+  'model_family',
+  'prompt_model_id',
+  'business_metadata',
+  'harness_metadata',
+  'harness_mode',
+];
+
+export function toCodexCatalog(models) {
+  return {
+    models: models.map((model) => {
+      const raw = model.raw || {};
+      const contextWindow = model.contextWindow || raw.context_window || 200000;
+      const entry = {
+        slug: model.slug,
+        display_name: `TRAE · ${model.slug}`,
+        description: model.description || raw.description || '',
+        default_reasoning_level: raw.default_reasoning_level || 'high',
+        supported_reasoning_levels:
+          Array.isArray(raw.supported_reasoning_levels) && raw.supported_reasoning_levels.length
+            ? raw.supported_reasoning_levels
+            : [
+                { effort: 'low', description: 'Fast responses with lighter reasoning' },
+                { effort: 'medium', description: 'Balances speed and reasoning depth' },
+                { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+              ],
+        context_window: contextWindow,
+        max_context_window: raw.max_context_window || contextWindow,
+        shell_type: raw.shell_type || 'shell_command',
+        visibility: raw.visibility || 'list',
+        supported_in_api: raw.supported_in_api !== false,
+        priority: raw.priority ?? 0,
+        input_modalities: raw.input_modalities || ['text', 'image'],
+        supports_parallel_tool_calls: raw.supports_parallel_tool_calls !== false,
+        tool_mode: raw.tool_mode || 'deferred_code_mode',
+        multi_agent_version: raw.multi_agent_version || 'v2',
+        use_responses_lite: raw.use_responses_lite ?? false,
+        apply_patch_tool_type: raw.apply_patch_tool_type || 'freeform',
+        web_search_tool_type: raw.web_search_tool_type || 'text',
+        truncation_policy: raw.truncation_policy || { mode: 'tokens', limit: 10000 },
+        supports_image_detail_original: raw.supports_image_detail_original ?? false,
+        support_verbosity: raw.support_verbosity ?? false,
+        default_verbosity: raw.default_verbosity ?? null,
+        supports_reasoning_summaries: raw.supports_reasoning_summaries ?? true,
+        default_reasoning_summary: raw.default_reasoning_summary || 'auto',
+        include_skills_usage_instructions: raw.include_skills_usage_instructions ?? true,
+      };
+      if (raw.model_messages && typeof raw.model_messages === 'object') {
+        entry.model_messages = raw.model_messages;
+      }
+      for (const key of CODEX_OPTIONAL_FIELDS) {
+        if (raw[key] !== undefined) entry[key] = raw[key];
+      }
+      return entry;
+    }),
+  };
+}
+
 export async function resolveModel(modelId) {
   const models = await listModels();
-  const wanted = stripModelPrefix(modelId).toLowerCase();
+  let normalized = String(modelId || '');
+  if (normalized.startsWith('claude-trae-')) {
+    normalized = normalized.slice('claude-trae-'.length);
+  } else if (normalized.startsWith('claude/')) {
+    normalized = normalized.slice('claude/'.length);
+  } else if (normalized.startsWith('anthropic/')) {
+    normalized = normalized.slice('anthropic/'.length);
+  }
+  const wanted = stripModelPrefix(normalized).toLowerCase();
   const found = models.find((model) => {
     return (
       model.slug.toLowerCase() === wanted ||

@@ -178,6 +178,12 @@ export async function* streamChat(params, { signal } = {}) {
         continue;
       }
 
+      if (event === 'progress_notice') {
+        const message = typeof data === 'string' ? data : JSON.stringify(payload);
+        yield { type: 'queue', message, raw: message };
+        continue;
+      }
+
       if (event === 'error') {
         const code = payload.code ?? null;
         const message = payload.message || payload.error || 'TRAE upstream error';
@@ -252,12 +258,16 @@ export async function completeChat(params, { signal } = {}) {
   let finishReason = 'stop';
   let usage = null;
   let metadata = null;
+  const queueMessages = [];
   const toolCalls = new Map();
 
   for await (const event of streamChat(params, { signal })) {
     switch (event.type) {
       case 'metadata':
         metadata = event.metadata;
+        break;
+      case 'queue':
+        queueMessages.push(event.message);
         break;
       case 'text':
         text += event.delta;
@@ -302,6 +312,7 @@ export async function completeChat(params, { signal } = {}) {
     finishReason,
     usage,
     metadata,
+    queueMessages,
     toolCalls: [...toolCalls.values()].sort((a, b) => a.index - b.index),
   };
 }

@@ -100,6 +100,23 @@ npm run setup -- --api-key my-secret
 | `--dry-run` | 只打印，不写文件 |
 | `--force` | 覆盖冲突的 Codex 顶层配置 |
 
+## 在 /model 中选择模型
+
+Codex 和 Claude Code 都支持通过 `/model` 切换模型：
+
+- **Codex**：setup 脚本会生成 `~/.codex/trae-models.json`，并写入 `model_catalog_json`。Codex 的 `/model` 会直接列出 TRAE 模型，不依赖代理在线刷新。
+- **Claude Code**：setup 脚本会写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，Claude Code 会请求代理的 `/v1/models`。为了让 Claude Code 接受自定义模型，代理会把模型 ID 暴露为 `claude-trae-<模型名>`，例如 `claude-trae-Seed-2.1-Turbo`。
+- 推理强度：Codex 使用 `model_reasoning_effort`；Claude Code 使用 `MAX_THINKING_TOKENS` / `output_config.effort`；OpenAI 客户端使用 `reasoning_effort`。
+
+## 排队信息
+
+TRAE 上游在排队或限流时会发送 `progress_notice` 事件。代理会：
+
+- 在代理日志中打印排队消息；
+- Codex：通过 `response.in_progress(status="queued")` 和 reasoning summary 展示；
+- Claude Code：在 thinking 块中展示 `[TRAE queue] ...`；
+- OpenAI Chat：在 `reasoning_content` 中展示 `[TRAE queue] ...`。
+
 ## 客户端配置
 
 ### Claude Code

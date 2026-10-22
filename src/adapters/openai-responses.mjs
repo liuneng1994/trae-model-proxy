@@ -182,7 +182,9 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   let messageText = '';
   let nextOutputIndex = 0;
   let usage = null;
+  let queueItem = null;
   const toolItems = new Map();
+  const outputItems = [];
 
   const inProgress = responseObject({
     id: responseId,
@@ -211,10 +213,78 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
     });
   };
 
+  const ensureQueueItem = () => {
+    if (queueItem && !queueItem.closed) return queueItem;
+    queueItem = null;
+    const itemId = `rs_${Date.now().toString(36)}`;
+    const outputIndex = nextOutputIndex;
+    nextOutputIndex += 1;
+    queueItem = { itemId, outputIndex, text: '', closed: false };
+    send('response.output_item.added', {
+      output_index: outputIndex,
+      item: { id: itemId, type: 'reasoning', summary: [] },
+    });
+    send('response.reasoning_summary_part.added', {
+      item_id: itemId,
+      output_index: outputIndex,
+      summary_index: 0,
+      part: { type: 'summary_text', text: '' },
+    });
+    return queueItem;
+  };
+
+  const closeQueueItem = () => {
+    if (!queueItem || queueItem.closed) return;
+    queueItem.closed = true;
+    send('response.reasoning_summary_text.done', {
+      item_id: queueItem.itemId,
+      output_index: queueItem.outputIndex,
+      summary_index: 0,
+      text: queueItem.text,
+    });
+    send('response.reasoning_summary_part.done', {
+      item_id: queueItem.itemId,
+      output_index: queueItem.outputIndex,
+      summary_index: 0,
+      part: { type: 'summary_text', text: queueItem.text },
+    });
+    const item = {
+      id: queueItem.itemId,
+      type: 'reasoning',
+      summary: [{ type: 'summary_text', text: queueItem.text }],
+    };
+    send('response.output_item.done', { output_index: queueItem.outputIndex, item });
+    outputItems.push({ outputIndex: queueItem.outputIndex, item });
+  };
+
   try {
     for await (const event of streamChat(params, { signal })) {
       switch (event.type) {
+        case 'queue': {
+          const item = ensureQueueItem();
+          const delta = `[TRAE queue] ${event.message}`;
+          item.text += delta;
+          send('response.reasoning_summary_text.delta', {
+            item_id: item.itemId,
+            output_index: item.outputIndex,
+            summary_index: 0,
+            delta,
+          });
+          send(
+            'response.in_progress',
+            responseObject({
+              id: responseId,
+              createdAt,
+              model: body.model,
+              status: 'queued',
+              output: [],
+            }),
+            { wrapResponse: true },
+          );
+          break;
+        }
         case 'text':
+          closeQueueItem();
           ensureMessage();
           messageText += event.delta;
           send('response.output_text.delta', {
@@ -225,6 +295,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           });
           break;
         case 'tool_start': {
+          closeQueueItem();
           const itemId = `fc_${event.index}_${Date.now().toString(36)}`;
           const outputIndex = nextOutputIndex;
           nextOutputIndex += 1;
@@ -266,7 +337,8 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
       }
     }
 
-    const output = [];
+    closeQueueItem();
+
     if (messageId) {
       send('response.output_text.done', {
         item_id: messageId,
@@ -286,7 +358,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
         output_index: messageOutputIndex,
         item,
       });
-      output.push(item);
+      outputItems.push({ outputIndex: messageOutputIndex, item });
     }
 
     for (const tool of [...toolItems.values()].sort((a, b) => a.outputIndex - b.outputIndex)) {
@@ -302,14 +374,12 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
         tool.args,
       );
       send('response.output_item.done', { output_index: tool.outputIndex, item });
-      output.push(item);
+      outputItems.push({ outputIndex: tool.outputIndex, item });
     }
 
-    output.sort((a, b) => {
-      const ai = a.id === messageId ? messageOutputIndex : [...toolItems.values()].find((t) => t.itemId === a.id)?.outputIndex ?? 0;
-      const bi = b.id === messageId ? messageOutputIndex : [...toolItems.values()].find((t) => t.itemId === b.id)?.outputIndex ?? 0;
-      return ai - bi;
-    });
+    const output = outputItems
+      .sort((a, b) => a.outputIndex - b.outputIndex)
+      .map((entry) => entry.item);
 
     send(
       'response.completed',

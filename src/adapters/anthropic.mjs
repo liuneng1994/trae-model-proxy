@@ -188,7 +188,8 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
       role: 'assistant',
       model: body.model,
       content: toAnthropicContent(result, {
-        includeThinking: body.thinking?.type === 'enabled',
+        includeThinking:
+          body.thinking?.type === 'enabled' || body.thinking?.type === 'adaptive',
       }),
       stop_reason: mapStopReasonToAnthropic(result.finishReason),
       stop_sequence: null,
@@ -198,7 +199,8 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
 
   startSSE(res);
   const send = (event, data) => writeSSEEvent(res, event, data);
-  const thinkingEnabled = body.thinking?.type === 'enabled';
+  const thinkingEnabled =
+    body.thinking?.type === 'enabled' || body.thinking?.type === 'adaptive';
 
   let nextIndex = 0;
   let textIndex = null;
@@ -264,6 +266,22 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
   try {
     for await (const event of streamChat(params, { signal })) {
       switch (event.type) {
+        case 'queue': {
+          if (thinkingEnabled) {
+            openThinking();
+            send('content_block_delta', {
+              type: 'content_block_delta',
+              index: thinkingIndex,
+              delta: {
+                type: 'thinking_delta',
+                thinking: `[TRAE queue] ${event.message}`,
+              },
+            });
+          } else {
+            send('ping', { type: 'ping', queue: event.message });
+          }
+          break;
+        }
         case 'reasoning':
           if (thinkingEnabled) {
             openThinking();

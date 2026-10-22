@@ -165,6 +165,9 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
         case 'reasoning':
           send({ reasoning_content: event.delta });
           break;
+        case 'queue':
+          send({ reasoning_content: `[TRAE queue] ${event.message}` });
+          break;
         case 'tool_start':
           send({
             tool_calls: [

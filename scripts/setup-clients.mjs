@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { listModels, toCodexCatalog } from '../src/models.mjs';
 
 const PROVIDER_ID = 'trae_proxy';
 const PROVIDER_SECTION = `[model_providers.${PROVIDER_ID}]`;
@@ -22,6 +23,10 @@ const CLAUDE_ENV_KEYS = [
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_SMALL_FAST_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY',
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
   'MAX_THINKING_TOKENS',
 ];
@@ -205,7 +210,28 @@ function codexBlock(options) {
   return lines.join('\n');
 }
 
-function configureCodex(options) {
+async function syncCodexCatalog(options) {
+  const file = path.join(codexHome(), 'trae-models.json');
+  if (options.uninstall) {
+    if (fs.existsSync(file)) {
+      if (!options.dryRun) fs.unlinkSync(file);
+      console.log(`[setup] Removed Codex model catalog: ${file}`);
+    }
+    return null;
+  }
+
+  const models = await listModels({ refresh: true });
+  const catalog = toCodexCatalog(models);
+  if (options.dryRun) {
+    console.log(`[setup] Would write Codex model catalog: ${file} (${catalog.models.length} models)`);
+    return file;
+  }
+  writeAtomic(file, `${JSON.stringify(catalog, null, 2)}\n`);
+  console.log(`[setup] Wrote Codex model catalog: ${file} (${catalog.models.length} models)`);
+  return file;
+}
+
+async function configureCodex(options) {
   const home = codexHome();
   const file = path.join(home, 'config.toml');
   const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
@@ -219,12 +245,17 @@ function configureCodex(options) {
   }
 
   if (!options.uninstall) {
+    const catalogFile = await syncCodexCatalog(options);
     content = upsertTopLevel(content, 'model', options.model);
     content = upsertTopLevel(content, 'model_provider', PROVIDER_ID);
     content = upsertTopLevel(content, 'model_reasoning_effort', options.effort);
+    content = upsertTopLevel(content, 'model_reasoning_summary', 'detailed');
+    content = upsertTopLevel(content, 'model_catalog_json', catalogFile);
     content = `${content.trimEnd()}\n\n${codexBlock(options)}\n`;
   } else {
     content = removeTopLevel(content, 'model_provider');
+    content = removeTopLevel(content, 'model_catalog_json');
+    await syncCodexCatalog(options);
     content = content.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
   }
 
@@ -252,12 +283,21 @@ function effortBudget(effort) {
   return '32768';
 }
 
+function claudeId(model) {
+  const slug = String(model).replace(/^trae\//, '');
+  return `claude-trae-${slug}`;
+}
+
 function claudeEnv(options) {
   return {
     ANTHROPIC_BASE_URL: options.baseUrl,
     ANTHROPIC_AUTH_TOKEN: options.apiKey || 'local-proxy',
-    ANTHROPIC_MODEL: options.model,
-    ANTHROPIC_SMALL_FAST_MODEL: options.smallModel,
+    ANTHROPIC_MODEL: claudeId(options.model),
+    ANTHROPIC_SMALL_FAST_MODEL: claudeId(options.smallModel),
+    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeId('trae/GPT-6.1-Sol'),
+    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeId(options.model),
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeId(options.smallModel),
+    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     MAX_THINKING_TOKENS: effortBudget(options.effort),
   };
@@ -301,7 +341,7 @@ function configureClaude(options) {
   if (saved) console.log(`[setup] Backup: ${saved}`);
 }
 
-function main() {
+async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
     printHelp();
@@ -311,7 +351,7 @@ function main() {
   const runCodex = !options.claudeOnly;
   const runClaude = !options.codexOnly;
 
-  if (runCodex) configureCodex(options);
+  if (runCodex) await configureCodex(options);
   if (runClaude) configureClaude(options);
 
   if (!options.uninstall) {
@@ -325,9 +365,7 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (err) {
+main().catch((err) => {
   console.error(`[setup] ${err.message}`);
   process.exit(1);
-}
+});

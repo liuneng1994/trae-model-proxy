@@ -2,7 +2,13 @@
 import http from 'node:http';
 import { config } from './config.mjs';
 import { authStatus } from './auth.mjs';
-import { listModels, resolveModel, toOpenAiModel } from './models.mjs';
+import {
+  listModels,
+  resolveModel,
+  toAnthropicModel,
+  toCodexCatalog,
+  toOpenAiModel,
+} from './models.mjs';
 import { handleOpenAiChat } from './adapters/openai-chat.mjs';
 import { handleOpenAiResponses } from './adapters/openai-responses.mjs';
 import { handleAnthropicMessages } from './adapters/anthropic.mjs';
@@ -67,8 +73,31 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/models/codex') {
+    const models = await listModels();
+    console.log(`[proxy] GET ${url.pathname} -> ${models.length} models`);
+    sendJson(res, 200, toCodexCatalog(models));
+    return;
+  }
+
   if (req.method === 'GET' && (url.pathname === '/v1/models' || url.pathname === '/models')) {
     const models = await listModels();
+    console.log(
+      `[proxy] GET ${url.pathname} anthropic=${Boolean(req.headers['anthropic-version'])} -> ${models.length} models`,
+    );
+    if (req.headers['anthropic-version']) {
+      sendJson(res, 200, {
+        data: models.map(toAnthropicModel),
+        has_more: false,
+        first_id: models.length ? toAnthropicModel(models[0]).id : null,
+        last_id: models.length ? toAnthropicModel(models[models.length - 1]).id : null,
+      });
+      return;
+    }
+    if (url.searchParams.get('format') === 'codex') {
+      sendJson(res, 200, toCodexCatalog(models));
+      return;
+    }
     sendJson(res, 200, {
       object: 'list',
       data: models.map(toOpenAiModel),
