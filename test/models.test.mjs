@@ -169,6 +169,7 @@ test('exposes standard and max ids for every max-capable model', () => {
     assert.ok(ids.includes(`trae/${model.slug}`));
     const supportsMax = Boolean(model.raw?.business_metadata?.variants?.max_key);
     assert.equal(ids.includes(`trae/${model.slug}-max`), supportsMax);
+    assert.equal(ids.includes(`claude-trae-${model.slug}-max[1m]`), supportsMax);
   }
   assert.equal(CLAUDE_ALIASES['claude-sonnet-4-5'], 'Seed-2.1-Turbo');
 });

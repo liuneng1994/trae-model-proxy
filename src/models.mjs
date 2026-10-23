@@ -142,6 +142,10 @@ export function claudeModelId(model) {
   return `claude-trae-${model.slug}`;
 }
 
+export function claudeMaxModelId(model) {
+  return `${claudeModelId(model)}-max[1m]`;
+}
+
 export function toAnthropicModel(model) {
   return {
     id: claudeModelId(model),
@@ -171,6 +175,11 @@ export function toAnthropicModels(models) {
     });
     const maxVariant = selectModelVariant(model, { maxMode: true });
     if (maxVariant.variant !== 'max') continue;
+    result.push({
+      id: claudeMaxModelId(model),
+      display_name: `TRAE · ${model.slug} · Max`,
+      description: model.description || '',
+    });
     result.push({
       id: proxyClaudeModelId(model, { maxMode: true }),
       display_name: `TRAE · ${model.slug} · Max`,

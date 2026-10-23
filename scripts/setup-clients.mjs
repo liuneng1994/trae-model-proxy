@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  claudeMaxModelId,
   listModels,
   proxyClaudeModelId,
   resolveModel,
@@ -242,6 +243,7 @@ function applyClaudeProfile(settings, { model, contextWindow, effort, models = [
       const maxVariant = selectModelVariant(available, { maxMode: true });
       if (maxVariant.variant === 'max') {
         setWindow(proxyClaudeModelId(available, { maxMode: true }), maxVariant.contextWindow);
+        setWindow(claudeMaxModelId(available), maxVariant.contextWindow);
       }
     }
   } else {

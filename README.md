@@ -153,8 +153,9 @@ npm run setup -- --api-key my-secret
 Codex 和 Claude Code 都支持通过 `/model` 切换模型：
 
 - **Codex**：setup 脚本会生成 `~/.codex/trae-models.json`，并写入 `model_catalog_json`。Codex 的 `/model` 会直接列出 TRAE 模型，不依赖代理在线刷新。
-- **Claude Code**：setup 脚本会写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，Claude Code 会请求代理的 `/v1/models`。代理会暴露四类 ID：
+- **Claude Code**：setup 脚本会写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，Claude Code 会请求代理的 `/v1/models`。代理会暴露五类 ID：
   - `claude-trae-<模型名>`，例如 `claude-trae-Seed-2.1-Turbo`；
+  - `claude-trae-<模型名>-max[1m]`，供 Claude `/model` 发现并选择 Max；
   - `trae/<模型名>`，显式路由到模型目录的 standard backend；
   - `trae/<模型名>-max`，例如 `trae/GPT-5.6-Sol-max`；这类 ID 会路由到模型目录的 `max_key`；
   - Claude Code 能识别的别名：`claude-opus-4-6` → GPT-6.1-Sol、`claude-sonnet-4-5` → Seed-2.1-Turbo、`claude-sonnet-4-6` → GPT-5.6-Sol、`claude-haiku-4-5` → DeepSeek-V4-Flash。
@@ -162,9 +163,11 @@ Codex 和 Claude Code 都支持通过 `/model` 切换模型：
   setup 默认选择 `trae/<模型名>-max`，并按目录中的 `max_context_window` 写入
   `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，避免 Claude Code 对自定义模型按 200K 提前 compact。
   不支持 max 的模型继续使用标准 backend 和标准窗口。
-- 支持 max 的每个模型都会同时出现在 `/model` 中：选择 `trae/<模型名>` 使用
-  standard，选择 `trae/<模型名>-max` 使用 Max；setup 会为两者分别写入正确的
-  `autoCompactWindow`。
+- 支持 max 的每个模型都会以 `claude-trae-<模型名>-max[1m]` 出现在 Claude
+  `/model` 中；精确的 `trae/<模型名>` / `trae/<模型名>-max` ID 可用于配置文件
+  和命令行。setup 会为 standard、Max 和精确路由 ID 分别写入正确的
+  `autoCompactWindow`。`[1m]` 用于绕过 Claude Code 对自定义 `claude-*` ID 的
+  200K cap，实际 compact 上限仍按 TRAE 目录的 800K/1M 窗口计算。
 - Claude Code 可能把自定义模型名规范化成 `claude-gpt-5-6-sol-max` 或追加 `[1m]` 后缀；代理会自动归一化并映射回对应的 TRAE 模型。
 - `npm run setup` 会清除旧的 `~/.claude/cache/gateway-models.json`，避免 `/model` 继续显示旧的 provider 标签（例如 `Coconut ...`）。
 - 推理强度：Codex 使用 `model_reasoning_effort`；Claude Code 使用 `MAX_THINKING_TOKENS` / `output_config.effort`；OpenAI 客户端使用 `reasoning_effort`。
