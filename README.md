@@ -151,6 +151,7 @@ Codex 和 Claude Code 都支持通过 `/model` 切换模型：
 
   使用 `claude-trae-*` 时 Claude Code 会提示 `unrecognized model` 并假设 200k 上下文，但调用正常；使用上面的别名不会出现该警告。
 - Claude Code 可能把自定义模型名规范化成 `claude-gpt-5-6-sol-max` 或追加 `[1m]` 后缀；代理会自动归一化并映射回对应的 TRAE 模型。
+- `npm run setup` 会清除旧的 `~/.claude/cache/gateway-models.json`，避免 `/model` 继续显示旧的 provider 标签（例如 `Coconut ...`）。
 - 推理强度：Codex 使用 `model_reasoning_effort`；Claude Code 使用 `MAX_THINKING_TOKENS` / `output_config.effort`；OpenAI 客户端使用 `reasoning_effort`。
 
 ## 自动刷新模型目录

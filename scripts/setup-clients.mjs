@@ -316,6 +316,15 @@ function claudeEnv(options) {
 function configureClaude(options) {
   const home = claudeHome();
   const file = path.join(home, 'settings.json');
+  const gatewayCache = path.join(home, 'cache', 'gateway-models.json');
+  if (!options.uninstall && fs.existsSync(gatewayCache)) {
+    if (options.dryRun) {
+      console.log(`[setup] Would clear Claude gateway model cache: ${gatewayCache}`);
+    } else {
+      fs.unlinkSync(gatewayCache);
+      console.log(`[setup] Cleared Claude gateway model cache: ${gatewayCache}`);
+    }
+  }
   let settings = {};
   if (fs.existsSync(file)) {
     try {
