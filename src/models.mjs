@@ -224,8 +224,16 @@ export function toCodexCatalog(models) {
   };
 }
 
+function normalizeModelKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
 export function resolveModelFromList(models, modelId) {
-  let normalized = String(modelId || '');
+  // Claude Code appends [1m] for its 1M-context variant and may canonicalize
+  // custom names (for example claude-gpt-5-6-sol-max[1m]).
+  let normalized = String(modelId || '').trim().replace(/\[1m\]$/i, '');
   if (normalized.startsWith('claude-trae-')) {
     normalized = normalized.slice('claude-trae-'.length);
   } else if (normalized.startsWith('claude/')) {
@@ -234,8 +242,14 @@ export function resolveModelFromList(models, modelId) {
     normalized = normalized.slice('anthropic/'.length);
   }
   const alias = CLAUDE_ALIASES[normalized.toLowerCase()];
-  if (alias) normalized = alias;
-  const wanted = stripModelPrefix(normalized).toLowerCase();
+  if (alias) {
+    normalized = alias;
+  } else if (normalized.startsWith('claude-')) {
+    normalized = normalized.slice('claude-'.length);
+  }
+  const wanted = stripModelPrefix(normalized)
+    .toLowerCase()
+    .replace(/-max$/i, '');
   const found = models.find((model) => {
     return (
       model.slug.toLowerCase() === wanted ||
@@ -254,6 +268,18 @@ export function resolveModelFromList(models, modelId) {
     );
   });
   if (loose) return loose;
+
+  const wantedKey = normalizeModelKey(wanted);
+  if (wantedKey) {
+    const normalizedMatch = models.find((model) => {
+      return (
+        normalizeModelKey(model.slug) === wantedKey ||
+        normalizeModelKey(model.configName) === wantedKey ||
+        normalizeModelKey(model.backendModel) === wantedKey
+      );
+    });
+    if (normalizedMatch) return normalizedMatch;
+  }
 
   const available = models.map((model) => model.id).join(', ');
   throw new ModelError(`Unknown model "${modelId}". Available models: ${available}`, 404);

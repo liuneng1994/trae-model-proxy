@@ -39,6 +39,15 @@ const models = [
     contextWindow: 216000,
     raw: {},
   },
+  {
+    id: 'trae/GPT-5.6-Sol',
+    slug: 'GPT-5.6-Sol',
+    configName: 'GPT-5.6-Sol',
+    backendModel: 'GPT-5.6-Sol__dev',
+    description: 'workhorse model',
+    contextWindow: 272000,
+    raw: {},
+  },
 ];
 
 test('resolves bare slug, trae prefix, and claude-trae prefix', () => {
@@ -54,6 +63,30 @@ test('resolves Claude Code aliases to TRAE models', () => {
   assert.equal(resolveModelFromList(models, 'claude-sonnet-4-5').slug, 'Seed-2.1-Turbo');
   assert.equal(resolveModelFromList(models, 'claude-opus-4-6').slug, 'GPT-6.1-Sol');
   assert.equal(resolveModelFromList(models, 'claude-haiku-4-5').slug, 'DeepSeek-V4-Flash');
+  assert.equal(resolveModelFromList(models, 'claude-sonnet-4-6').slug, 'GPT-5.6-Sol');
+});
+
+test('resolves Claude Code canonical and 1M-context model ids', () => {
+  assert.equal(
+    resolveModelFromList(models, 'claude-gpt-5-6-sol-max[1m]').slug,
+    'GPT-5.6-Sol',
+  );
+  assert.equal(
+    resolveModelFromList(models, 'claude-gpt-5-6-sol-max').slug,
+    'GPT-5.6-Sol',
+  );
+  assert.equal(
+    resolveModelFromList(models, 'claude-gpt-6-1-sol-max[1m]').slug,
+    'GPT-6.1-Sol',
+  );
+  assert.equal(
+    resolveModelFromList(models, 'claude-sonnet-4-6[1m]').slug,
+    'GPT-5.6-Sol',
+  );
+  assert.equal(
+    resolveModelFromList(models, 'claude-trae-gpt-5.6-sol').slug,
+    'GPT-5.6-Sol',
+  );
 });
 
 test('rejects unknown models with available model ids', () => {
@@ -68,14 +101,16 @@ test('exposes both Claude aliases and claude-trae ids', () => {
   assert.ok(ids.includes('claude-sonnet-4-5'));
   assert.ok(ids.includes('claude-opus-4-6'));
   assert.ok(ids.includes('claude-haiku-4-5'));
+  assert.ok(ids.includes('claude-sonnet-4-6'));
   assert.ok(ids.includes('claude-trae-Seed-2.1-Turbo'));
   assert.ok(ids.includes('claude-trae-GPT-6.1-Sol'));
+  assert.ok(ids.includes('claude-trae-GPT-5.6-Sol'));
   assert.equal(CLAUDE_ALIASES['claude-sonnet-4-5'], 'Seed-2.1-Turbo');
 });
 
 test('builds a Codex catalog with required fields', () => {
   const catalog = toCodexCatalog(models);
-  assert.equal(catalog.models.length, 3);
+  assert.equal(catalog.models.length, 4);
   const first = catalog.models[0];
   assert.equal(first.slug, 'Seed-2.1-Turbo');
   assert.equal(first.display_name, 'TRAE · Seed-2.1-Turbo');
