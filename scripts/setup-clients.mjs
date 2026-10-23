@@ -14,7 +14,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listModels, resolveModel, toCodexCatalog } from '../src/models.mjs';
+import {
+  listModels,
+  proxyClaudeModelId,
+  resolveModel,
+  selectModelVariant,
+  toCodexCatalog,
+} from '../src/models.mjs';
 import { getAuth } from '../src/auth.mjs';
 
 const PROVIDER_ID = 'trae_proxy';
@@ -49,7 +55,8 @@ function envEnabled(value, fallback = true) {
 
 function parseArgs(argv) {
   const options = {
-    model: process.env.TRAE_DEFAULT_MODEL || 'trae/GPT-5.6-Sol',
+    model: process.env.TRAE_DEFAULT_MODEL || 'trae/GPT-6.1-Sol',
+    subagentModel: process.env.TRAE_SUBAGENT_MODEL || 'trae/GPT-5.6-Sol',
     smallModel: process.env.TRAE_SMALL_MODEL || 'trae/DeepSeek-V4-Flash',
     effort: process.env.TRAE_DEFAULT_REASONING_EFFORT || 'xhigh',
     maxMode: envEnabled(process.env.TRAE_MAX_MODE, true),
@@ -77,6 +84,9 @@ function parseArgs(argv) {
         break;
       case '--small-model':
         options.smallModel = next();
+        break;
+      case '--subagent-model':
+        options.subagentModel = next();
         break;
       case '--effort':
         options.effort = next();
@@ -133,7 +143,8 @@ function printHelp() {
   console.log(`Usage: npm run setup -- [options]
 
 Options:
-  --model <id>          Model for both clients (default: trae/GPT-5.6-Sol)
+  --model <id>          Main model for both clients (default: trae/GPT-6.1-Sol)
+  --subagent-model <id> Claude subagent model (default: trae/GPT-5.6-Sol)
   --small-model <id>    Claude Code small/fast model (default: trae/DeepSeek-V4-Flash)
   --effort <level>      low | medium | high | xhigh | max (default: xhigh)
   --no-max              Use standard TRAE model variants instead of max
@@ -196,7 +207,14 @@ function ensureCommandHook(settings, event, command) {
   settings.hooks = hooks;
 }
 
-function applyClaudeProfile(settings, { model, contextWindow, effort }) {
+function autoCompactWindow(contextWindow) {
+  return Math.max(
+    100000,
+    Math.min(1000000, Math.floor(contextWindow * 0.875)),
+  );
+}
+
+function applyClaudeProfile(settings, { model, contextWindow, effort, models = [] }) {
   const permissions = { ...(settings.permissions || {}) };
   permissions.allow = addUnique(permissions.allow, CODEGRAPH_PERMISSION);
   settings.permissions = permissions;
@@ -207,16 +225,29 @@ function applyClaudeProfile(settings, { model, contextWindow, effort }) {
     ...DEFAULT_CLAUDE_PLUGINS,
   };
   settings.effortLevel = effort;
-  settings.modelSettings = {
-    ...(settings.modelSettings || {}),
-    [model.toLowerCase()]: {
-      ...(settings.modelSettings?.[model.toLowerCase()] || {}),
-      autoCompactWindow: Math.max(
-        100000,
-        Math.min(1000000, Math.floor(contextWindow * 0.875)),
-      ),
-    },
+  const modelSettings = { ...(settings.modelSettings || {}) };
+  const setWindow = (id, window) => {
+    const key = id.toLowerCase();
+    modelSettings[key] = {
+      ...(modelSettings[key] || {}),
+      autoCompactWindow: autoCompactWindow(window),
+    };
   };
+  if (models.length) {
+    for (const available of models) {
+      setWindow(
+        proxyClaudeModelId(available, { maxMode: false }),
+        available.contextWindow || 200000,
+      );
+      const maxVariant = selectModelVariant(available, { maxMode: true });
+      if (maxVariant.variant === 'max') {
+        setWindow(proxyClaudeModelId(available, { maxMode: true }), maxVariant.contextWindow);
+      }
+    }
+  } else {
+    setWindow(model, contextWindow);
+  }
+  settings.modelSettings = modelSettings;
   settings.tui = 'fullscreen';
   settings.autoMemoryEnabled = true;
   settings.skipDangerousModePermissionPrompt = true;
@@ -380,6 +411,9 @@ function claudeModelFor(model, { maxMode = false } = {}) {
 
 function claudeEnv(options, contextWindow) {
   const mainModel = claudeModelFor(options.model, { maxMode: options.maxMode });
+  const subagentModel = claudeModelFor(options.subagentModel, {
+    maxMode: options.maxMode,
+  });
   const smallModel = claudeModelFor(options.smallModel, { maxMode: options.maxMode });
   return {
     ANTHROPIC_BASE_URL: options.baseUrl,
@@ -400,7 +434,7 @@ function claudeEnv(options, contextWindow) {
     ...(options.maxMode
       ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextWindow) }
       : {}),
-    CLAUDE_CODE_SUBAGENT_MODEL: mainModel,
+    CLAUDE_CODE_SUBAGENT_MODEL: subagentModel,
     CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
     MAX_THINKING_TOKENS: effortBudget(options.effort),
   };
@@ -430,14 +464,16 @@ async function configureClaude(options) {
   const env = { ...(settings.env || {}) };
   let configuredModel = null;
   let configuredContextWindow = null;
+  let availableModels = [];
   if (options.uninstall) {
     for (const key of CLAUDE_ENV_KEYS) delete env[key];
   } else {
+    configuredModel = claudeModelFor(options.model, { maxMode: options.maxMode });
+    if (!options.contextWindow) availableModels = await listModels({ refresh: true });
     const selected = options.contextWindow
       ? { contextWindow: options.contextWindow }
-      : await resolveModel(options.model, { maxMode: options.maxMode });
+      : await resolveModel(configuredModel, { maxMode: options.maxMode });
     configuredContextWindow = selected.contextWindow || 200000;
-    configuredModel = claudeModelFor(options.model, { maxMode: options.maxMode });
     Object.assign(env, claudeEnv(options, configuredContextWindow));
     if (!options.maxMode) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
   }
@@ -458,6 +494,7 @@ async function configureClaude(options) {
       model: configuredModel,
       contextWindow: configuredContextWindow,
       effort: options.effort,
+      models: availableModels,
     });
   }
 

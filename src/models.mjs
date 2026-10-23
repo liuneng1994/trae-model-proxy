@@ -165,8 +165,15 @@ export function toAnthropicModels(models) {
   for (const model of models) {
     result.push(toAnthropicModel(model));
     result.push({
-      id: proxyClaudeModelId(model),
-      display_name: `TRAE · ${model.slug}${selectModelVariant(model).variant === 'max' ? ' · Max' : ''}`,
+      id: proxyClaudeModelId(model, { maxMode: false }),
+      display_name: `TRAE · ${model.slug} · Standard`,
+      description: model.description || '',
+    });
+    const maxVariant = selectModelVariant(model, { maxMode: true });
+    if (maxVariant.variant !== 'max') continue;
+    result.push({
+      id: proxyClaudeModelId(model, { maxMode: true }),
+      display_name: `TRAE · ${model.slug} · Max`,
       description: model.description || '',
     });
   }
@@ -264,7 +271,11 @@ export function resolveModelFromList(models, modelId, { maxMode = config.maxMode
   // custom names (for example claude-gpt-5-6-sol-max[1m]).
   const requested = String(modelId || '').trim().replace(/\[1m\]$/i, '');
   const explicitMax = /-max$/i.test(requested);
-  const explicitStandard = /__dev$/i.test(requested);
+  const explicitProxyModel = requested
+    .toLowerCase()
+    .startsWith(config.modelPrefix.toLowerCase());
+  const explicitStandard =
+    /__dev$/i.test(requested) || (explicitProxyModel && !explicitMax);
   let normalized = requested;
   if (normalized.startsWith('claude-trae-')) {
     normalized = normalized.slice('claude-trae-'.length);

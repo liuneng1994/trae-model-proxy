@@ -12,7 +12,8 @@ const HOME = os.homedir();
 
 function parseArgs(argv) {
   const options = {
-    model: 'trae/GPT-5.6-Sol',
+    model: 'trae/GPT-6.1-Sol',
+    subagentModel: 'trae/GPT-5.6-Sol',
     smallModel: 'trae/DeepSeek-V4-Flash',
     effort: 'xhigh',
     host: '127.0.0.1',
@@ -29,6 +30,7 @@ function parseArgs(argv) {
       return argv[i];
     };
     if (arg === '--model') options.model = next();
+    else if (arg === '--subagent-model') options.subagentModel = next();
     else if (arg === '--small-model') options.smallModel = next();
     else if (arg === '--effort') options.effort = next();
     else if (arg === '--host') options.host = next();
@@ -46,7 +48,8 @@ function printHelp() {
   console.log(`Usage: npm run install:all -- [options]
 
 Options:
-  --model <id>         Default model (default: trae/GPT-5.6-Sol)
+  --model <id>         Default main model (default: trae/GPT-6.1-Sol)
+  --subagent-model <id> Claude subagent model (default: trae/GPT-5.6-Sol)
   --small-model <id>   Claude Code small/fast model
   --effort <level>     low | medium | high | xhigh | max
   --host <host>        Proxy bind host (default: 127.0.0.1)
@@ -132,6 +135,8 @@ function configureClients(options) {
     path.join(__dirname, 'setup-clients.mjs'),
     '--model',
     options.model,
+    '--subagent-model',
+    options.subagentModel,
     '--small-model',
     options.smallModel,
     '--effort',

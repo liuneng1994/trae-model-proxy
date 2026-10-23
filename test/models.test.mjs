@@ -132,6 +132,11 @@ test('uses max variants by default and supports a standard-mode opt out', () => 
   assert.equal(standard.contextWindow, 272000);
   assert.equal(standard.variant, 'standard');
 
+  const explicitStandard = resolveModelFromList(models, 'trae/GPT-5.6-Sol');
+  assert.equal(explicitStandard.backendModel, 'GPT-5.6-Sol__dev');
+  assert.equal(explicitStandard.contextWindow, 272000);
+  assert.equal(explicitStandard.variant, 'standard');
+
   const explicitMax = resolveModelFromList(models, 'trae/GPT-5.6-Sol-max', {
     maxMode: false,
   });
@@ -145,7 +150,7 @@ test('rejects unknown models with available model ids', () => {
   );
 });
 
-test('exposes both Claude aliases and claude-trae ids', () => {
+test('exposes standard and max ids for every max-capable model', () => {
   const ids = toAnthropicModels(models).map((model) => model.id);
   assert.ok(ids.includes('claude-sonnet-4-5'));
   assert.ok(ids.includes('claude-opus-4-6'));
@@ -154,9 +159,17 @@ test('exposes both Claude aliases and claude-trae ids', () => {
   assert.ok(ids.includes('claude-trae-Seed-2.1-Turbo'));
   assert.ok(ids.includes('claude-trae-GPT-6.1-Sol'));
   assert.ok(ids.includes('claude-trae-GPT-5.6-Sol'));
+  assert.ok(ids.includes('trae/GPT-6.1-Sol'));
   assert.ok(ids.includes('trae/GPT-6.1-Sol-max'));
+  assert.ok(ids.includes('trae/GPT-5.6-Sol'));
   assert.ok(ids.includes('trae/GPT-5.6-Sol-max'));
   assert.ok(ids.includes('trae/Seed-2.1-Turbo'));
+  assert.ok(!ids.includes('trae/Seed-2.1-Turbo-max'));
+  for (const model of models) {
+    assert.ok(ids.includes(`trae/${model.slug}`));
+    const supportsMax = Boolean(model.raw?.business_metadata?.variants?.max_key);
+    assert.equal(ids.includes(`trae/${model.slug}-max`), supportsMax);
+  }
   assert.equal(CLAUDE_ALIASES['claude-sonnet-4-5'], 'Seed-2.1-Turbo');
 });
 
