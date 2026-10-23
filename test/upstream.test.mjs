@@ -53,3 +53,74 @@ test('streamChat retries a 429 before any output', async () => {
   server.closeAllConnections?.();
   await new Promise((resolve) => server.close(resolve));
 });
+
+test('streamChat preserves arguments when TRAE repeats the tool boundary', async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const output = (toolCalls) => {
+      res.write(`event: output\ndata: ${JSON.stringify({ tool_calls: toolCalls })}\n\n`);
+    };
+
+    output([
+      {
+        index: 0,
+        id: 'call_1',
+        type: 'function',
+        function_call: { name: 'Bash', arguments: '' },
+      },
+    ]);
+    for (const argumentsDelta of ['{"', 'command', '":"', 'pwd', '"}']) {
+      output([
+        {
+          index: 0,
+          id: '',
+          type: '',
+          function_call: { name: '', arguments: argumentsDelta },
+        },
+      ]);
+    }
+    output([
+      {
+        index: 0,
+        id: 'call_1',
+        type: 'function',
+        function_call: { name: 'Bash', arguments: '' },
+      },
+    ]);
+    res.write('event: done\ndata: {"finish_reason":"tool_calls"}\n\n');
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  process.env.TRAE_CHAT_URL = `http://127.0.0.1:${port}/chat`;
+  process.env.TRAE_ACCESS_TOKEN = 'test-token';
+
+  const { streamChat } = await import('../src/upstream/trae-client.mjs');
+  const events = [];
+  for await (const event of streamChat({
+    model: { slug: 'test', configName: 'test', backendModel: 'test' },
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'run pwd' }] }],
+    tools: [],
+    userInput: 'run pwd',
+    maxTokens: 64,
+  })) {
+    events.push(event);
+  }
+
+  assert.equal(events.filter((event) => event.type === 'tool_start').length, 1);
+  assert.equal(events.filter((event) => event.type === 'tool_end').length, 1);
+  assert.equal(
+    events
+      .filter((event) => event.type === 'tool_args')
+      .map((event) => event.delta)
+      .join(''),
+    '{"command":"pwd"}',
+  );
+  assert.ok(
+    events.some((event) => event.type === 'done' && event.finishReason === 'tool_calls'),
+  );
+
+  server.closeAllConnections?.();
+  await new Promise((resolve) => server.close(resolve));
+});

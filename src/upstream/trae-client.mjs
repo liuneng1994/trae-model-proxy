@@ -256,11 +256,23 @@ async function* streamChatOnce(params, { signal } = {}) {
         for (const call of parseToolCalls(payload.tool_calls)) {
           const existing = activeTools.get(call.index);
           if (call.id || call.name) {
-            if (existing) {
+            const isDifferentCall =
+              existing &&
+              ((call.id && existing.id && call.id !== existing.id) ||
+                (call.name && existing.name && call.name !== existing.name));
+            if (isDifferentCall) {
               yield { type: 'tool_end', index: call.index, id: existing.id, name: existing.name };
             }
-            activeTools.set(call.index, { id: call.id, name: call.name });
-            yield { type: 'tool_start', index: call.index, id: call.id, name: call.name };
+            if (!existing || isDifferentCall) {
+              activeTools.set(call.index, { id: call.id, name: call.name });
+              yield { type: 'tool_start', index: call.index, id: call.id, name: call.name };
+            } else {
+              // TRAE repeats the same tool id/name after streaming all argument
+              // fragments. Treat that frame as a closing boundary, not a new
+              // empty tool call that would overwrite the accumulated arguments.
+              if (!existing.id && call.id) existing.id = call.id;
+              if (!existing.name && call.name) existing.name = call.name;
+            }
           }
           if (call.arguments) {
             if (!activeTools.has(call.index)) {
