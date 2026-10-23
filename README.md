@@ -152,6 +152,17 @@ Codex 和 Claude Code 都支持通过 `/model` 切换模型：
   使用 `claude-trae-*` 时 Claude Code 会提示 `unrecognized model` 并假设 200k 上下文，但调用正常；使用上面的别名不会出现该警告。
 - 推理强度：Codex 使用 `model_reasoning_effort`；Claude Code 使用 `MAX_THINKING_TOKENS` / `output_config.effort`；OpenAI 客户端使用 `reasoning_effort`。
 
+## 自动刷新模型目录
+
+代理会按 `TRAE_MODEL_REFRESH_MS`（默认 5 分钟）自动调用 `traecli models --json`：
+
+- 刷新内存中的模型列表；
+- 模型有变化时自动更新 `~/.codex/trae-models.json`；
+- Codex 下次读取模型目录（新会话或重新打开 `/model`）即可看到新模型；
+- `POST /v1/models/refresh` 可手动触发；
+- `TRAE_MODEL_REFRESH_MS=0` 可关闭定时刷新；
+- `PROXY_SYNC_CODEX_CATALOG=0` 只刷新内存，不写 Codex 文件。
+
 ## 排队信息
 
 TRAE 上游在排队或限流时会发送 `progress_notice` 事件。代理会：
@@ -160,6 +171,15 @@ TRAE 上游在排队或限流时会发送 `progress_notice` 事件。代理会�
 - Codex：通过 `response.in_progress(status="queued")` 和 reasoning summary 展示；
 - Claude Code：在 thinking 块中展示 `[TRAE queue] ...`；
 - OpenAI Chat：在 `reasoning_content` 中展示 `[TRAE queue] ...`。
+
+实时查看排队进度：
+
+```bash
+curl http://127.0.0.1:8787/v1/queue
+curl -N http://127.0.0.1:8787/v1/queue/stream
+```
+
+`/healthz` 也会返回最近的 `queue` 状态。
 
 ## 客户端配置
 
@@ -254,8 +274,10 @@ npm test
 ## 可观测性
 
 ```bash
-curl http://127.0.0.1:8787/healthz   # 登录、模型数、最近队列状态
-curl http://127.0.0.1:8787/metrics   # Prometheus 文本指标
+curl http://127.0.0.1:8787/healthz        # 登录、模型数、目录同步、最近队列状态
+curl http://127.0.0.1:8787/metrics        # Prometheus 文本指标
+curl http://127.0.0.1:8787/v1/queue       # 当前排队状态
+curl -N http://127.0.0.1:8787/v1/queue/stream  # 排队进度 SSE
 curl -X POST http://127.0.0.1:8787/v1/models/refresh
 npm run doctor                        # 代理、Codex、Claude 配置体检
 ```
@@ -280,6 +302,10 @@ npm run doctor                        # 代理、Codex、Claude 配置体检
 | `TRAE_MAX_ATTEMPTS` | `3` | 上游 429/5xx 最大尝试次数 |
 | `TRAE_RETRY_BASE_MS` | `500` | 重试退避基数 |
 | `TRAE_RETRY_MAX_MS` | `10000` | 单次重试最大等待 |
+| `TRAE_MODEL_REFRESH_MS` | `300000` | 模型目录自动刷新间隔，0 关闭 |
+| `PROXY_SYNC_CODEX_CATALOG` | `1` | 是否自动写 Codex 模型目录 |
+| `PROXY_CODEX_CATALOG_PATH` | `~/.codex/trae-models.json` | Codex 模型目录路径 |
+| `PROXY_QUEUE_KEEPALIVE_MS` | `15000` | 排队 SSE 心跳间隔 |
 | `PROXY_LOG_FORMAT` | `text` | `text` 或 `json` |
 | `PROXY_ALLOW_INSECURE_BIND` | `0` | 允许非 loopback 且无 API key 启动 |
 | `PROXY_VERBOSE` | `0` | 输出调试日志 |

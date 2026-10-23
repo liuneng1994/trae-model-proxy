@@ -14,14 +14,18 @@ import { handleOpenAiChat } from './adapters/openai-chat.mjs';
 import { handleOpenAiResponses } from './adapters/openai-responses.mjs';
 import { handleAnthropicMessages } from './adapters/anthropic.mjs';
 import {
+  endSSE,
   readJsonBody,
   sendError,
   sendJson,
+  startSSE,
   writeCors,
+  writeSSEEvent,
 } from './util/http.mjs';
+import { getCatalogSyncState, syncCodexCatalog } from './catalog.mjs';
 import { inc, addGauge, setGauge, renderPrometheus } from './util/metrics.mjs';
 import { info, error as logError } from './util/logger.mjs';
-import { getQueueState } from './util/state.mjs';
+import { getQueueState, subscribeQueue } from './util/state.mjs';
 import { safeEqual, isLoopbackHost } from './util/security.mjs';
 
 function requestIds(req) {
@@ -74,6 +78,27 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/queue') {
+    sendJson(res, 200, { queue: getQueueState() });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/v1/queue/stream') {
+    startSSE(res);
+    const send = (queue) => writeSSEEvent(res, 'queue', queue || { phase: 'idle' });
+    send(getQueueState());
+    const unsubscribe = subscribeQueue(send);
+    const keepAlive = setInterval(() => {
+      if (!res.writableEnded) res.write(': keepalive\n\n');
+    }, config.queueKeepAliveMs);
+    keepAlive.unref?.();
+    res.on('close', () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/healthz') {
     const auth = authStatus();
     let models = [];
@@ -90,6 +115,7 @@ async function route(req, res) {
       modelError,
       upstream: config.chatUrl,
       queue: getQueueState(),
+      catalogSync: getCatalogSyncState(),
     });
     return;
   }
@@ -136,9 +162,9 @@ async function route(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/v1/models/refresh') {
-    const models = await listModels({ refresh: true });
-    info('models.refresh', { requestId, count: models.length });
-    sendJson(res, 200, { ok: true, models: models.length });
+    const result = await syncCodexCatalog({ force: true });
+    info('models.refresh', { requestId, ...result });
+    sendJson(res, 200, { ok: true, ...result });
     return;
   }
 
@@ -283,6 +309,20 @@ if (!isLoopbackHost(config.host) && !config.apiKey && !config.allowInsecureBind)
 }
 
 setGauge('proxy_active_requests', {}, 0);
+
+async function refreshModels(reason) {
+  try {
+    const result = await syncCodexCatalog({ force: true });
+    info('models.auto_refresh', { reason, ...result });
+  } catch (err) {
+    logError('models.auto_refresh.error', { reason, message: err.message });
+  }
+}
+
+if (config.modelRefreshMs > 0) {
+  setTimeout(() => refreshModels('startup'), 1000).unref?.();
+  setInterval(() => refreshModels('interval'), config.modelRefreshMs).unref?.();
+}
 
 server.listen(config.port, config.host, () => {
   info('startup.listening', {

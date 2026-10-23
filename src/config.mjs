@@ -39,6 +39,11 @@ export const config = {
   retryBaseMs: int(process.env.TRAE_RETRY_BASE_MS, 500),
   retryMaxMs: int(process.env.TRAE_RETRY_MAX_MS, 10000),
   modelCacheMs: int(process.env.TRAE_MODEL_CACHE_MS, 300000),
+  modelRefreshMs: int(process.env.TRAE_MODEL_REFRESH_MS, 300000),
+  syncCodexCatalog: bool(process.env.PROXY_SYNC_CODEX_CATALOG, true),
+  codexCatalogPath:
+    process.env.PROXY_CODEX_CATALOG_PATH || path.join(home, '.codex', 'trae-models.json'),
+  queueKeepAliveMs: int(process.env.PROXY_QUEUE_KEEPALIVE_MS, 15000),
   defaultMaxTokens: int(process.env.TRAE_DEFAULT_MAX_TOKENS, 32768),
   defaultReasoningEffort: process.env.TRAE_DEFAULT_REASONING_EFFORT || 'high',
   traeHome,

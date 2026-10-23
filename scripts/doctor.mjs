@@ -36,6 +36,9 @@ async function main() {
   console.log(`auth:          ${health.auth?.ok ? 'logged in' : health.auth?.error}`);
   console.log(`models:        ${health.models}${health.modelError ? ` (${health.modelError})` : ''}`);
   console.log(`queue:         ${health.queue ? `${health.queue.phase} ${health.queue.message}` : 'idle'}`);
+  console.log(
+    `catalog sync:  ${health.catalogSync?.at || 'never'} (${health.catalogSync?.models ?? 0} models)`,
+  );
   console.log(`upstream:      ${health.upstream}`);
   console.log('');
 
