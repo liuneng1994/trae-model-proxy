@@ -49,12 +49,18 @@ export function mapFinishReason(reason) {
 function mapUsage(raw = {}) {
   const prompt = raw.prompt_tokens ?? 0;
   const completion = raw.completion_tokens ?? 0;
+  const cacheRead = raw.cache_read_input_tokens ?? 0;
+  const cacheCreation = raw.cache_creation_input_tokens ?? 0;
   return {
+    // TRAE reports prompt_tokens as the total prompt, including cached input.
+    // Keep that total for OpenAI-compatible usage, but also expose the
+    // Anthropic-style uncached portion so clients do not count cache twice.
     promptTokens: prompt,
+    uncachedInputTokens: Math.max(0, prompt - cacheRead - cacheCreation),
     completionTokens: completion,
     totalTokens: raw.total_tokens ?? prompt + completion,
-    cacheReadTokens: raw.cache_read_input_tokens ?? 0,
-    cacheCreationTokens: raw.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: cacheRead,
+    cacheCreationTokens: cacheCreation,
     reasoningTokens: raw.reasoning_tokens ?? 0,
   };
 }

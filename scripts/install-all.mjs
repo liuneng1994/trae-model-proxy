@@ -12,9 +12,9 @@ const HOME = os.homedir();
 
 function parseArgs(argv) {
   const options = {
-    model: 'trae/Seed-2.1-Turbo',
+    model: 'trae/GPT-5.6-Sol',
     smallModel: 'trae/DeepSeek-V4-Flash',
-    effort: 'high',
+    effort: 'xhigh',
     host: '127.0.0.1',
     port: '8787',
     noService: false,
@@ -46,9 +46,9 @@ function printHelp() {
   console.log(`Usage: npm run install:all -- [options]
 
 Options:
-  --model <id>         Default model (default: trae/Seed-2.1-Turbo)
+  --model <id>         Default model (default: trae/GPT-5.6-Sol)
   --small-model <id>   Claude Code small/fast model
-  --effort <level>     low | medium | high
+  --effort <level>     low | medium | high | xhigh | max
   --host <host>        Proxy bind host (default: 127.0.0.1)
   --port <port>        Proxy port (default: 8787)
   --no-service         Configure clients only, do not install the service

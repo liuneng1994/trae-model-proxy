@@ -61,8 +61,16 @@ function anthropicToolResultBlocks(content) {
     } else if (part.type === 'image') {
       const image = imageBlock(part.source);
       if (image) blocks.push(image);
+    } else if (part.type === 'tool_reference' && part.tool_name) {
+      // ToolSearch returns structured references rather than text. TRAE's raw
+      // chat protocol has no equivalent block type, so preserve the result as
+      // non-empty text; otherwise the upstream rejects the call as missing its
+      // tool output.
+      blocks.push(textBlock(`Tool loaded: ${part.tool_name}`));
     } else if (typeof part.text === 'string') {
       blocks.push(textBlock(part.text));
+    } else if (typeof part === 'object') {
+      blocks.push(textBlock(JSON.stringify(part)));
     }
   }
   return blocks.length ? blocks : [textBlock('')];
@@ -382,12 +390,14 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
           });
           break;
         }
-        case 'usage':
-          inputTokens = event.usage.promptTokens;
-          outputTokens = event.usage.completionTokens;
-          cacheReadTokens = event.usage.cacheReadTokens || 0;
-          cacheCreationTokens = event.usage.cacheCreationTokens || 0;
+        case 'usage': {
+          const usage = mapUsageToAnthropic(event.usage);
+          inputTokens = usage.input_tokens;
+          outputTokens = usage.output_tokens;
+          cacheReadTokens = usage.cache_read_input_tokens || 0;
+          cacheCreationTokens = usage.cache_creation_input_tokens || 0;
           break;
+        }
         case 'done':
           stopReason = mapStopReasonToAnthropic(event.finishReason);
           break;

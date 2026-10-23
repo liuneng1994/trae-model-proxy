@@ -94,8 +94,13 @@ npm run setup
 
 - 写入 `~/.codex/config.toml`，注册 `trae_proxy` provider
 - 合并写入 `~/.claude/settings.json` 的 `env`
-- 默认模型 `trae/Seed-2.1-Turbo`
-- 默认推理强度 `high`
+- 默认模型 `trae/GPT-5.6-Sol-max`
+- 默认使用模型目录中的 max variant，并把真实 max context 配置给 Claude Code
+- 默认推理强度 `xhigh`
+- Claude auto mode 使用客户端 classifier，不探测 TRAE 上游不支持的 server-side classifier
+- 所有 subagent、teammate 和 workflow agent 强制使用 `trae/GPT-5.6-Sol-max`
+- 使用 fullscreen TUI、auto memory、700K auto-compact window 和 Codegraph prompt hook
+- 启用 `aws-serverless`、`frontend-design` 两个已安装的官方插件
 - 修改前自动备份原配置
 
 自定义模型和推理强度：
@@ -132,7 +137,9 @@ npm run setup -- --api-key my-secret
 | --- | --- |
 | `--model <id>` | 两个客户端使用的模型 |
 | `--small-model <id>` | Claude Code 的 small/fast 模型 |
-| `--effort low\|medium\|high` | 推理强度 |
+| `--effort low\|medium\|high\|xhigh\|max` | 推理强度 |
+| `--no-max` | 使用标准 `__dev` variant，不切换到 `max_key` |
+| `--context-window <tokens>` | 覆盖 Claude Code 的上下文窗口探测值 |
 | `--base-url <url>` | 代理地址，默认 `http://127.0.0.1:8787` |
 | `--api-key <key>` | 可选的代理 API key |
 | `--codex-only` / `--claude-only` | 只配置一个客户端 |
@@ -145,11 +152,14 @@ npm run setup -- --api-key my-secret
 Codex 和 Claude Code 都支持通过 `/model` 切换模型：
 
 - **Codex**：setup 脚本会生成 `~/.codex/trae-models.json`，并写入 `model_catalog_json`。Codex 的 `/model` 会直接列出 TRAE 模型，不依赖代理在线刷新。
-- **Claude Code**：setup 脚本会写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，Claude Code 会请求代理的 `/v1/models`。代理会暴露两类 ID：
+- **Claude Code**：setup 脚本会写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，Claude Code 会请求代理的 `/v1/models`。代理会暴露三类 ID：
   - `claude-trae-<模型名>`，例如 `claude-trae-Seed-2.1-Turbo`；
+  - `trae/<模型名>-max`，例如 `trae/GPT-5.6-Sol-max`；这类 ID 会路由到模型目录的 `max_key`；
   - Claude Code 能识别的别名：`claude-opus-4-6` → GPT-6.1-Sol、`claude-sonnet-4-5` → Seed-2.1-Turbo、`claude-sonnet-4-6` → GPT-5.6-Sol、`claude-haiku-4-5` → DeepSeek-V4-Flash。
 
-  使用 `claude-trae-*` 时 Claude Code 会提示 `unrecognized model` 并假设 200k 上下文，但调用正常；使用上面的别名不会出现该警告。
+  setup 默认选择 `trae/<模型名>-max`，并按目录中的 `max_context_window` 写入
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，避免 Claude Code 对自定义模型按 200K 提前 compact。
+  不支持 max 的模型继续使用标准 backend 和标准窗口。
 - Claude Code 可能把自定义模型名规范化成 `claude-gpt-5-6-sol-max` 或追加 `[1m]` 后缀；代理会自动归一化并映射回对应的 TRAE 模型。
 - `npm run setup` 会清除旧的 `~/.claude/cache/gateway-models.json`，避免 `/model` 继续显示旧的 provider 标签（例如 `Coconut ...`）。
 - 推理强度：Codex 使用 `model_reasoning_effort`；Claude Code 使用 `MAX_THINKING_TOKENS` / `output_config.effort`；OpenAI 客户端使用 `reasoning_effort`。
@@ -190,8 +200,9 @@ curl -N http://127.0.0.1:8787/v1/queue/stream
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 export ANTHROPIC_AUTH_TOKEN=local-proxy
-export ANTHROPIC_MODEL=trae/Seed-2.1-Turbo
-export ANTHROPIC_SMALL_FAST_MODEL=trae/DeepSeek-V4-Flash
+export ANTHROPIC_MODEL=trae/GPT-5.6-Sol-max
+export ANTHROPIC_SMALL_FAST_MODEL=trae/DeepSeek-V4-Flash-max
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=800000
 ```
 
 如果设置了 `PROXY_API_KEY`，把 `ANTHROPIC_AUTH_TOKEN` 改成对应的值。
@@ -201,7 +212,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=trae/DeepSeek-V4-Flash
 `~/.codex/config.toml`：
 
 ```toml
-model = "trae/Seed-2.1-Turbo"
+model = "trae/GPT-5.6-Sol"
 model_provider = "trae_proxy"
 
 [model_providers.trae_proxy]
@@ -246,7 +257,7 @@ Claude Code：
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 \
 ANTHROPIC_AUTH_TOKEN=local-proxy \
-ANTHROPIC_MODEL=trae/Seed-2.1-Turbo \
+ANTHROPIC_MODEL=trae/GPT-5.6-Sol-max \
 claude -p "Reply with exactly: CLAUDE_OK"
 ```
 
@@ -264,6 +275,19 @@ Claude Code 对自定义模型会提示 `unrecognized model` 并按 200k 上下�
 Claude Code 的 auto-compact 会通过 `/v1/messages` 发送一个“只输出文本、不要调用工具”的总结请求。代理会按普通请求处理，把总结返回给 Claude Code，然后继续下一轮。
 
 已用 mock 上游验证完整链路：大上下文 → compact 请求 → summary 响应 → 第二个问题继续。测试使用 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`，避免真实消耗 100k+ tokens。
+
+Anthropic usage 中的 `input_tokens` 只包含未缓存输入，已缓存部分单独放在
+`cache_read_input_tokens` / `cache_creation_input_tokens`；代理会从 TRAE 返回的总
+`prompt_tokens` 中扣除这两项，避免 Claude Code 重复计算上下文并提前 compact。
+
+## Claude auto mode
+
+TRAE 的 `llm_raw_chat` 不实现 Anthropic 的 `safeguards` / `safeguard_results`
+协议，因此无法提供 Anthropic server-side classifier 的免计费能力。`npm run setup`
+会按照 [Claude Code 官方建议](https://code.claude.com/docs/en/auto-mode-classifier-billing)
+设置 `CLAUDE_CODE_AUTO_MODE_SERVER=0`：auto mode 继续正常
+工作并直接使用 Claude Code 客户端 classifier，同时避免每个新会话先进行一次必然失败的
+server-side classifier 探测和兼容性提示。classifier 请求仍会像以前一样使用 TRAE 模型额度。
 
 ## 测试
 
@@ -296,6 +320,7 @@ npm run doctor                        # 代理、Codex、Claude 配置体检
 | `PROXY_PORT` | `8787` | 监听端口 |
 | `PROXY_API_KEY` | 空 | 非空时要求客户端携带 Bearer / x-api-key |
 | `TRAE_DEFAULT_MODEL` | `DeepSeek-V4.1-Flash` | 未指定 model 时的默认模型 |
+| `TRAE_MAX_MODE` | `1` | 有 `max_key` 时默认路由到 max variant；设为 `0` 使用标准 variant |
 | `TRAE_CHAT_URL` | `https://copilot-cn.bytedance.net/api/ide/v2/llm_raw_chat` | TRAE 模型网关地址 |
 | `TRAE_ACCESS_TOKEN` | 空 | 覆盖 `auth.json` 中的 access token |
 | `TRAE_AUTH_FILE` | `~/.trae/cli/auth.json` | TRAE 登录凭证路径 |

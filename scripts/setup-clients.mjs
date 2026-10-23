@@ -14,11 +14,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listModels, toCodexCatalog } from '../src/models.mjs';
+import { listModels, resolveModel, toCodexCatalog } from '../src/models.mjs';
 import { getAuth } from '../src/auth.mjs';
 
 const PROVIDER_ID = 'trae_proxy';
 const PROVIDER_SECTION = `[model_providers.${PROVIDER_ID}]`;
+const CODEGRAPH_PERMISSION = 'mcp__codegraph__*';
+const CODEGRAPH_PROMPT_HOOK = 'codegraph prompt-hook';
+const DEFAULT_CLAUDE_PLUGINS = {
+  'aws-serverless@claude-plugins-official': true,
+  'frontend-design@claude-plugins-official': true,
+};
 const CLAUDE_ENV_KEYS = [
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN',
@@ -29,14 +35,25 @@ const CLAUDE_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY',
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  'CLAUDE_CODE_AUTO_MODE_SERVER',
+  'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+  'CLAUDE_CODE_SUBAGENT_MODEL',
+  'CLAUDE_CODE_SUBAGENT_MODEL_FORCE',
   'MAX_THINKING_TOKENS',
 ];
 
+function envEnabled(value, fallback = true) {
+  if (value === undefined) return fallback;
+  return !['0', 'false', 'no', 'off'].includes(String(value).toLowerCase());
+}
+
 function parseArgs(argv) {
   const options = {
-    model: process.env.TRAE_DEFAULT_MODEL || 'trae/Seed-2.1-Turbo',
+    model: process.env.TRAE_DEFAULT_MODEL || 'trae/GPT-5.6-Sol',
     smallModel: process.env.TRAE_SMALL_MODEL || 'trae/DeepSeek-V4-Flash',
-    effort: process.env.TRAE_DEFAULT_REASONING_EFFORT || 'high',
+    effort: process.env.TRAE_DEFAULT_REASONING_EFFORT || 'xhigh',
+    maxMode: envEnabled(process.env.TRAE_MAX_MODE, true),
+    contextWindow: Number(process.env.TRAE_CLAUDE_CONTEXT_WINDOW) || null,
     baseUrl: process.env.TRAE_PROXY_BASE_URL || 'http://127.0.0.1:8787',
     apiKey: process.env.TRAE_PROXY_API_KEY || '',
     codexOnly: false,
@@ -63,6 +80,12 @@ function parseArgs(argv) {
         break;
       case '--effort':
         options.effort = next();
+        break;
+      case '--no-max':
+        options.maxMode = false;
+        break;
+      case '--context-window':
+        options.contextWindow = Number(next());
         break;
       case '--base-url':
         options.baseUrl = next();
@@ -94,8 +117,11 @@ function parseArgs(argv) {
     }
   }
 
-  if (!['low', 'medium', 'high'].includes(options.effort)) {
-    throw new Error('--effort must be low, medium, or high');
+  if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(options.effort)) {
+    throw new Error('--effort must be low, medium, high, xhigh, or max');
+  }
+  if (options.contextWindow !== null && (!Number.isInteger(options.contextWindow) || options.contextWindow <= 0)) {
+    throw new Error('--context-window must be a positive integer');
   }
   if (options.codexOnly && options.claudeOnly) {
     throw new Error('--codex-only and --claude-only cannot be used together');
@@ -107,9 +133,11 @@ function printHelp() {
   console.log(`Usage: npm run setup -- [options]
 
 Options:
-  --model <id>          Model for both clients (default: trae/Seed-2.1-Turbo)
+  --model <id>          Model for both clients (default: trae/GPT-5.6-Sol)
   --small-model <id>    Claude Code small/fast model (default: trae/DeepSeek-V4-Flash)
-  --effort <level>      Reasoning effort: low | medium | high (default: high)
+  --effort <level>      low | medium | high | xhigh | max (default: xhigh)
+  --no-max              Use standard TRAE model variants instead of max
+  --context-window <n>  Override Claude Code context window detection
   --base-url <url>      Proxy base URL (default: http://127.0.0.1:8787)
   --api-key <key>       Optional proxy API key
   --codex-only          Configure only Codex CLI
@@ -149,6 +177,50 @@ function writeAtomic(file, content) {
   const temp = `${file}.tmp.${process.pid}`;
   fs.writeFileSync(temp, content, { mode: 0o600 });
   fs.renameSync(temp, file);
+}
+
+function addUnique(values, value) {
+  return [...new Set([...(Array.isArray(values) ? values : []), value])];
+}
+
+function ensureCommandHook(settings, event, command) {
+  const hooks = { ...(settings.hooks || {}) };
+  const entries = Array.isArray(hooks[event]) ? [...hooks[event]] : [];
+  const exists = entries.some((entry) =>
+    (Array.isArray(entry?.hooks) ? entry.hooks : []).some(
+      (hook) => hook?.type === 'command' && hook.command === command,
+    ),
+  );
+  if (!exists) entries.push({ hooks: [{ type: 'command', command }] });
+  hooks[event] = entries;
+  settings.hooks = hooks;
+}
+
+function applyClaudeProfile(settings, { model, contextWindow, effort }) {
+  const permissions = { ...(settings.permissions || {}) };
+  permissions.allow = addUnique(permissions.allow, CODEGRAPH_PERMISSION);
+  settings.permissions = permissions;
+
+  ensureCommandHook(settings, 'UserPromptSubmit', CODEGRAPH_PROMPT_HOOK);
+  settings.enabledPlugins = {
+    ...(settings.enabledPlugins || {}),
+    ...DEFAULT_CLAUDE_PLUGINS,
+  };
+  settings.effortLevel = effort;
+  settings.modelSettings = {
+    ...(settings.modelSettings || {}),
+    [model.toLowerCase()]: {
+      ...(settings.modelSettings?.[model.toLowerCase()] || {}),
+      autoCompactWindow: Math.max(
+        100000,
+        Math.min(1000000, Math.floor(contextWindow * 0.875)),
+      ),
+    },
+  };
+  settings.tui = 'fullscreen';
+  settings.autoMemoryEnabled = true;
+  settings.skipDangerousModePermissionPrompt = true;
+  settings.theme = 'auto';
 }
 
 function tomlValue(value) {
@@ -293,27 +365,48 @@ const CLAUDE_ALIAS_BY_SLUG = {
   'DeepSeek-V4-Flash': 'claude-haiku-4-5',
 };
 
-function claudeModelFor(model) {
-  const slug = String(model).replace(/^trae\//, '');
+function claudeModelFor(model, { maxMode = false } = {}) {
+  const value = typeof model === 'string' ? model : model.slug;
+  let slug = String(value)
+    .replace(/\[1m\]$/i, '')
+    .replace(/^trae\//, '')
+    .replace(/^claude-trae-/, '')
+    .replace(/-max$/i, '');
+  const alias = Object.entries(CLAUDE_ALIAS_BY_SLUG).find(([, id]) => id === slug);
+  if (alias) slug = alias[0];
+  if (maxMode) return `trae/${slug}-max`;
   return CLAUDE_ALIAS_BY_SLUG[slug] || `claude-trae-${slug}`;
 }
 
-function claudeEnv(options) {
+function claudeEnv(options, contextWindow) {
+  const mainModel = claudeModelFor(options.model, { maxMode: options.maxMode });
+  const smallModel = claudeModelFor(options.smallModel, { maxMode: options.maxMode });
   return {
     ANTHROPIC_BASE_URL: options.baseUrl,
     ANTHROPIC_AUTH_TOKEN: options.apiKey || 'local-proxy',
-    ANTHROPIC_MODEL: claudeModelFor(options.model),
-    ANTHROPIC_SMALL_FAST_MODEL: claudeModelFor(options.smallModel),
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-6',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: claudeModelFor(options.model),
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: claudeModelFor(options.smallModel),
+    ANTHROPIC_MODEL: mainModel,
+    ANTHROPIC_SMALL_FAST_MODEL: smallModel,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: claudeModelFor('trae/GPT-6.1-Sol', {
+      maxMode: options.maxMode,
+    }),
+    ANTHROPIC_DEFAULT_SONNET_MODEL: mainModel,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: smallModel,
     CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    // TRAE llm_raw_chat does not return Anthropic safeguard_results. Tell
+    // Claude Code to use its local auto-mode classifier directly instead of
+    // probing an unsupported server-side classifier on every new session.
+    CLAUDE_CODE_AUTO_MODE_SERVER: '0',
+    ...(options.maxMode
+      ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextWindow) }
+      : {}),
+    CLAUDE_CODE_SUBAGENT_MODEL: mainModel,
+    CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
     MAX_THINKING_TOKENS: effortBudget(options.effort),
   };
 }
 
-function configureClaude(options) {
+async function configureClaude(options) {
   const home = claudeHome();
   const file = path.join(home, 'settings.json');
   const gatewayCache = path.join(home, 'cache', 'gateway-models.json');
@@ -335,21 +428,37 @@ function configureClaude(options) {
   }
 
   const env = { ...(settings.env || {}) };
+  let configuredModel = null;
+  let configuredContextWindow = null;
   if (options.uninstall) {
     for (const key of CLAUDE_ENV_KEYS) delete env[key];
   } else {
-    Object.assign(env, claudeEnv(options));
+    const selected = options.contextWindow
+      ? { contextWindow: options.contextWindow }
+      : await resolveModel(options.model, { maxMode: options.maxMode });
+    configuredContextWindow = selected.contextWindow || 200000;
+    configuredModel = claudeModelFor(options.model, { maxMode: options.maxMode });
+    Object.assign(env, claudeEnv(options, configuredContextWindow));
+    if (!options.maxMode) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
   }
 
   if (Object.keys(env).length) settings.env = env;
   else delete settings.env;
 
   if (options.uninstall) {
-    if (typeof settings.model === 'string' && settings.model.startsWith('claude-')) {
+    if (
+      typeof settings.model === 'string' &&
+      (settings.model.startsWith('claude-') || settings.model.startsWith('trae/'))
+    ) {
       delete settings.model;
     }
   } else {
-    settings.model = claudeModelFor(options.model);
+    settings.model = configuredModel;
+    applyClaudeProfile(settings, {
+      model: configuredModel,
+      contextWindow: configuredContextWindow,
+      effort: options.effort,
+    });
   }
 
   const next = `${JSON.stringify(settings, null, 2)}\n`;
@@ -379,7 +488,7 @@ async function main() {
   const runClaude = !options.codexOnly;
 
   if (runCodex) await configureCodex(options);
-  if (runClaude) configureClaude(options);
+  if (runClaude) await configureClaude(options);
 
   if (!options.uninstall) {
     console.log('');

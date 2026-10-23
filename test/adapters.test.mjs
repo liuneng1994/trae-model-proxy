@@ -201,3 +201,48 @@ test('Anthropic keeps image blocks inside tool_result', () => {
   assert.ok(toolMessage.content[0].image_url.url.startsWith('data:image/png;base64,'));
   assert.equal(toolMessage.content[1].text, 'image loaded');
 });
+
+test('Anthropic preserves ToolSearch references as non-empty tool output', () => {
+  const request = anthropicToTrae(
+    {
+      model: 'trae/GPT-5.6-Sol-max',
+      messages: [
+        { role: 'user', content: 'load codegraph' },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'call_search',
+              name: 'ToolSearch',
+              input: { query: 'select:mcp__codegraph__codegraph_explore' },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'call_search',
+              content: [
+                {
+                  type: 'tool_reference',
+                  tool_name: 'mcp__codegraph__codegraph_explore',
+                },
+              ],
+            },
+            { type: 'text', text: 'Tool loaded.' },
+          ],
+        },
+      ],
+      tools: [],
+      max_tokens: 64,
+    },
+    model,
+  );
+
+  const toolMessage = request.messages.find((message) => message.role === 'tool');
+  assert.equal(toolMessage.tool_call_id, 'call_search');
+  assert.equal(toolMessage.content[0].text, 'Tool loaded: mcp__codegraph__codegraph_explore');
+});

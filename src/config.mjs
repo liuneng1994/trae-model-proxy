@@ -20,6 +20,7 @@ export const config = {
   port: int(process.env.PROXY_PORT, 8787),
   apiKey: process.env.PROXY_API_KEY || '',
   defaultModel: process.env.TRAE_DEFAULT_MODEL || 'DeepSeek-V4.1-Flash',
+  maxMode: bool(process.env.TRAE_MAX_MODE, true),
   modelPrefix: process.env.TRAE_MODEL_PREFIX || 'trae/',
   chatUrl:
     process.env.TRAE_CHAT_URL ||

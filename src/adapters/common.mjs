@@ -59,8 +59,16 @@ export function mapUsageToAnthropic(usage) {
   if (!usage) {
     return { input_tokens: 0, output_tokens: 0 };
   }
+  const uncachedInputTokens =
+    usage.uncachedInputTokens ??
+    Math.max(
+      0,
+      (usage.promptTokens || 0) -
+        (usage.cacheReadTokens || 0) -
+        (usage.cacheCreationTokens || 0),
+    );
   return {
-    input_tokens: usage.promptTokens,
+    input_tokens: uncachedInputTokens,
     output_tokens: usage.completionTokens,
     cache_read_input_tokens: usage.cacheReadTokens,
     cache_creation_input_tokens: usage.cacheCreationTokens,

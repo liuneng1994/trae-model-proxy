@@ -226,6 +226,10 @@ async function route(req, res) {
     method: req.method,
     path: url.pathname,
     model: modelId,
+    resolvedModel: model.slug,
+    variant: model.variant || 'standard',
+    backendModel: model.backendModel,
+    contextWindow: model.contextWindow,
     stream: Boolean(body.stream),
   });
   if (config.verbose) {

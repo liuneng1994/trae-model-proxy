@@ -28,7 +28,17 @@ const models = [
     backendModel: 'GPT-6.1-Sol__dev',
     description: 'frontier model',
     contextWindow: 475000,
-    raw: {},
+    raw: {
+      max_context_window: 800000,
+      business_metadata: {
+        variants: {
+          standard_key: 'GPT-6.1-Sol__dev',
+          standard_context_window: 475000,
+          max_key: 'GPT-6.1-Sol__max',
+          max_context_window: 800000,
+        },
+      },
+    },
   },
   {
     id: 'trae/DeepSeek-V4-Flash',
@@ -37,7 +47,17 @@ const models = [
     backendModel: 'DeepSeek-V4-Flash__dev',
     description: 'fast model',
     contextWindow: 216000,
-    raw: {},
+    raw: {
+      max_context_window: 1000000,
+      business_metadata: {
+        variants: {
+          standard_key: 'DeepSeek-V4-Flash__dev',
+          standard_context_window: 216000,
+          max_key: 'DeepSeek-V4-Flash__max',
+          max_context_window: 1000000,
+        },
+      },
+    },
   },
   {
     id: 'trae/GPT-5.6-Sol',
@@ -46,7 +66,17 @@ const models = [
     backendModel: 'GPT-5.6-Sol__dev',
     description: 'workhorse model',
     contextWindow: 272000,
-    raw: {},
+    raw: {
+      max_context_window: 800000,
+      business_metadata: {
+        variants: {
+          standard_key: 'GPT-5.6-Sol__dev',
+          standard_context_window: 272000,
+          max_key: 'GPT-5.6-Sol__max',
+          max_context_window: 800000,
+        },
+      },
+    },
   },
 ];
 
@@ -89,6 +119,25 @@ test('resolves Claude Code canonical and 1M-context model ids', () => {
   );
 });
 
+test('uses max variants by default and supports a standard-mode opt out', () => {
+  const max = resolveModelFromList(models, 'claude-sonnet-4-6');
+  assert.equal(max.backendModel, 'GPT-5.6-Sol__max');
+  assert.equal(max.contextWindow, 800000);
+  assert.equal(max.variant, 'max');
+
+  const standard = resolveModelFromList(models, 'claude-sonnet-4-6', {
+    maxMode: false,
+  });
+  assert.equal(standard.backendModel, 'GPT-5.6-Sol__dev');
+  assert.equal(standard.contextWindow, 272000);
+  assert.equal(standard.variant, 'standard');
+
+  const explicitMax = resolveModelFromList(models, 'trae/GPT-5.6-Sol-max', {
+    maxMode: false,
+  });
+  assert.equal(explicitMax.backendModel, 'GPT-5.6-Sol__max');
+});
+
 test('rejects unknown models with available model ids', () => {
   assert.throws(
     () => resolveModelFromList(models, 'does-not-exist'),
@@ -105,6 +154,9 @@ test('exposes both Claude aliases and claude-trae ids', () => {
   assert.ok(ids.includes('claude-trae-Seed-2.1-Turbo'));
   assert.ok(ids.includes('claude-trae-GPT-6.1-Sol'));
   assert.ok(ids.includes('claude-trae-GPT-5.6-Sol'));
+  assert.ok(ids.includes('trae/GPT-6.1-Sol-max'));
+  assert.ok(ids.includes('trae/GPT-5.6-Sol-max'));
+  assert.ok(ids.includes('trae/Seed-2.1-Turbo'));
   assert.equal(CLAUDE_ALIASES['claude-sonnet-4-5'], 'Seed-2.1-Turbo');
 });
 

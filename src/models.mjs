@@ -115,6 +115,29 @@ export const CLAUDE_ALIASES = {
   'claude-haiku-4-5': 'DeepSeek-V4-Flash',
 };
 
+function variantsOf(model) {
+  return model?.raw?.business_metadata?.variants || {};
+}
+
+export function selectModelVariant(model, { maxMode = config.maxMode } = {}) {
+  const variants = variantsOf(model);
+  if (!maxMode || !variants.max_key) {
+    return { ...model, variant: 'standard' };
+  }
+  return {
+    ...model,
+    backendModel: variants.max_key,
+    contextWindow:
+      variants.max_context_window || model.raw?.max_context_window || model.contextWindow,
+    variant: 'max',
+  };
+}
+
+export function proxyClaudeModelId(model, { maxMode = config.maxMode } = {}) {
+  const effective = selectModelVariant(model, { maxMode });
+  return `trae/${model.slug}${effective.variant === 'max' ? '-max' : ''}`;
+}
+
 export function claudeModelId(model) {
   return `claude-trae-${model.slug}`;
 }
@@ -141,6 +164,11 @@ export function toAnthropicModels(models) {
   }
   for (const model of models) {
     result.push(toAnthropicModel(model));
+    result.push({
+      id: proxyClaudeModelId(model),
+      display_name: `TRAE · ${model.slug}${selectModelVariant(model).variant === 'max' ? ' · Max' : ''}`,
+      description: model.description || '',
+    });
   }
   return result;
 }
@@ -177,8 +205,9 @@ const CODEX_OPTIONAL_FIELDS = [
 export function toCodexCatalog(models) {
   return {
     models: models.map((model) => {
+      const effective = selectModelVariant(model);
       const raw = model.raw || {};
-      const contextWindow = model.contextWindow || raw.context_window || 200000;
+      const contextWindow = effective.contextWindow || raw.context_window || 200000;
       const entry = {
         slug: model.slug,
         display_name: `TRAE · ${model.slug}`,
@@ -230,10 +259,13 @@ function normalizeModelKey(value) {
     .replace(/[^a-z0-9]/g, '');
 }
 
-export function resolveModelFromList(models, modelId) {
+export function resolveModelFromList(models, modelId, { maxMode = config.maxMode } = {}) {
   // Claude Code appends [1m] for its 1M-context variant and may canonicalize
   // custom names (for example claude-gpt-5-6-sol-max[1m]).
-  let normalized = String(modelId || '').trim().replace(/\[1m\]$/i, '');
+  const requested = String(modelId || '').trim().replace(/\[1m\]$/i, '');
+  const explicitMax = /-max$/i.test(requested);
+  const explicitStandard = /__dev$/i.test(requested);
+  let normalized = requested;
   if (normalized.startsWith('claude-trae-')) {
     normalized = normalized.slice('claude-trae-'.length);
   } else if (normalized.startsWith('claude/')) {
@@ -258,7 +290,11 @@ export function resolveModelFromList(models, modelId) {
       model.backendModel.toLowerCase() === wanted
     );
   });
-  if (found) return found;
+  if (found) {
+    return selectModelVariant(found, {
+      maxMode: explicitMax || (maxMode && !explicitStandard),
+    });
+  }
 
   // Allow the backend model name to be passed directly.
   const loose = models.find((model) => {
@@ -267,7 +303,11 @@ export function resolveModelFromList(models, modelId) {
       model.configName.toLowerCase().includes(wanted)
     );
   });
-  if (loose) return loose;
+  if (loose) {
+    return selectModelVariant(loose, {
+      maxMode: explicitMax || (maxMode && !explicitStandard),
+    });
+  }
 
   const wantedKey = normalizeModelKey(wanted);
   if (wantedKey) {
@@ -278,24 +318,29 @@ export function resolveModelFromList(models, modelId) {
         normalizeModelKey(model.backendModel) === wantedKey
       );
     });
-    if (normalizedMatch) return normalizedMatch;
+    if (normalizedMatch) {
+      return selectModelVariant(normalizedMatch, {
+        maxMode: explicitMax || (maxMode && !explicitStandard),
+      });
+    }
   }
 
   const available = models.map((model) => model.id).join(', ');
   throw new ModelError(`Unknown model "${modelId}". Available models: ${available}`, 404);
 }
 
-export async function resolveModel(modelId) {
-  return resolveModelFromList(await listModels(), modelId);
+export async function resolveModel(modelId, options) {
+  return resolveModelFromList(await listModels(), modelId, options);
 }
 
 export function toOpenAiModel(model) {
+  const effective = selectModelVariant(model);
   return {
     id: model.id,
     object: 'model',
     created: Math.floor(Date.now() / 1000),
     owned_by: 'trae',
-    context_window: model.contextWindow,
+    context_window: effective.contextWindow,
     description: model.description,
   };
 }
