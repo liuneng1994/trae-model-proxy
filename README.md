@@ -282,6 +282,7 @@ Claude Code 对自定义模型会提示 `unrecognized model` 并按 200k 上下�
 - Responses API 会透传模型的 `reasoning`，输出 `response.reasoning_summary_text.delta/done`；Codex 设置 `model_reasoning_summary = "detailed"` 即可看到。
 - Anthropic 的 `thinking` / `output_config.effort`、OpenAI 的 `reasoning_effort` 都会映射到上游的 `reasoning_effort`。
 - Anthropic 的 `cache_control` 会在 system / tool_result 文本块上保留。
+- Responses 支持 namespace 函数工具和 Codex `custom` / freeform 工具：上游以 `{input: string}` 函数传递，客户端接收 `custom_tool_call` 和原始输入；代理不执行补丁或 shell，也不原生校验 Lark grammar。
 
 ## 自动 compact
 
@@ -307,6 +308,32 @@ small/fast 模型（默认 `trae/DeepSeek-V4-Flash-max`），避免验证请求�
 `/auto-mode-setup` 和 Claude Code hooks 会使用结构化输出。代理会把客户端提供的
 JSON Schema 转成系统指令，由模型按 schema 输出 JSON；这是模拟实现，不是上游原生能力。
 
+## Anthropic Web Search
+
+代理接受 `web_search_20250305` 工具定义并在代理端执行工具循环，返回
+`server_tool_use` / `web_search_tool_result`，不会将服务端工具交给客户端执行。
+
+**默认使用 TRAE 自带搜索**，复用本机 TRAE 登录凭证，无需第三方 API key。
+搜索调用 `https://copilot-cn.bytedance.net/api/ide/v1/web_search`，请求为
+`{user_input: query}`，把返回的 `references`（`uri/title/snippets`）转换成搜索结果。
+已用公开文档查询验证真实“模型调用 → TRAE 搜索 → 继续回答”的流式链路。
+
+可选配置：
+
+- `TRAE_WEB_SEARCH_URL`：覆盖 TRAE 搜索地址（测试或其他网关）。
+- `PROXY_WEB_SEARCH_PROVIDER=disabled`：禁止实际搜索，调用返回 `tool_unavailable`。
+- `PROXY_WEB_SEARCH_URL`：改用你信任的自定义搜索服务，优先于默认 TRAE 后端。
+- `PROXY_WEB_SEARCH_API_KEY`：自定义后端可选 Bearer key；不会向其发送 TRAE 凭证。
+- 自定义接口接受 `POST` JSON：`{query, max_results, allowed_domains, blocked_domains, user_location}`。
+- 自定义接口返回 `{results: [{url, title, content}]}`，其中 `content` 可用 `snippet` 替代。
+
+查询会发送给选择的搜索后端，可能消耗 TRAE 额度。代理在结果侧检查域名限制，
+不保证搜索引擎只检索这些域名；TRAE 当前不支持精确 `user_location`，带该设置的
+搜索调用返回 `invalid_input`，不静默忽略。搜索失败返回 `tool_unavailable`，不伪造结果。
+结果摘录以进程内密钥加密后返回，重启后旧摘录无法解密，但 URL/title 仍可保留。
+当前是兼容实现，不提供原生 Anthropic citation、搜索计费或动态过滤；带 Web Search
+的流式请求按模型轮次缓冲文本，搜索期间发送 ping。
+
 ## 测试
 
 ```bash
@@ -322,6 +349,14 @@ npm run test:clients
 ```
 
 该测试使用临时客户端配置和本地 mock 上游，验证实际客户端文本和工具往返，不修改真实用户配置。客户端版本不同可能需要调整工具契约；mock 通过不能证明真实上游支持所有模型和参数。
+
+显式执行真实 TRAE 搜索验证（需要登录，会发送公开文档查询并可能消耗模型额度）：
+
+```bash
+npm run test:live-search
+```
+
+覆盖直接搜索、非流式和流式“模型 → 搜索 → 回答”链路。默认 `npm test` 跳过真实上游和本机客户端测试。
 
 ## 可观测性
 
@@ -384,7 +419,7 @@ TRAE_API_BASE_URL=http://127.0.0.1:8788 traecli exec -m Seed-2.1-Turbo "reply OK
 - Access token 过期后需要手动执行 `traecli login`，代理不会自动刷新。
 - 上游返回 429 / 5xx 会在未输出内容时自动重试，并遵循有上限的 `Retry-After`；输出后出错不重试。未收到 `done` 的截断流返回错误，不会伪装成功。
 - Responses 输出达到 token 上限时返回 `status: incomplete`、`incomplete_details.reason: max_output_tokens`；流式发送 `response.incomplete`。
-- 采样参数（`temperature` / `top_p` 等）、`n > 1`、结构化输出、Responses 服务端历史/存储及 hosted tools 未实现；明确返回 400，不再静默忽略。
+- 采样参数（`temperature` / `top_p` 等）、`n > 1`、Responses 服务端历史/存储及除 Anthropic Web Search 外的 hosted tools 未实现；明确返回 400，不再静默忽略。结构化输出使用系统指令模拟，并非原生 schema 保证。
 - stop 序列（`stop` / `stop_sequences`，最多 4 个）由代理在输出侧模拟：命中第一个序列后截断文本，Anthropic 返回 `stop_reason: "stop_sequence"`，OpenAI 返回 `finish_reason: "stop"`。
 - reasoning/thinking 是上游推理文本的兼容摘要，不是 Anthropic 原生签名 thinking。
 - 本工具只适合本机个人使用，默认只监听 `127.0.0.1`，不要直接暴露到公网。

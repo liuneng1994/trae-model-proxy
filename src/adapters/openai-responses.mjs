@@ -77,7 +77,7 @@ function normalizeToolChoice(choice) {
     if (choice === 'auto' || choice === 'none' || choice === 'required') return choice;
     return undefined;
   }
-  if (choice && choice.type === 'function' && choice.name) {
+  if (choice && ['function', 'custom'].includes(choice.type) && choice.name) {
     return { type: 'function', function: { name: choice.name } };
   }
   return undefined;
@@ -100,7 +100,7 @@ export function toTraeRequest(body, model, ids = {}) {
       if (item.type === 'message' || (!item.type && item.role)) {
         const role = item.role === 'developer' ? 'system' : item.role;
         messages.push({ role, content: responseContentBlocks(item.content) });
-      } else if (item.type === 'function_call') {
+      } else if (item.type === 'function_call' || item.type === 'custom_tool_call') {
         const id = ensureToolId(item.call_id || item.id, messages.length);
         if (item.name) toolNames.set(id, item.name);
         messages.push({
@@ -113,12 +113,12 @@ export function toTraeRequest(body, model, ids = {}) {
               type: 'function',
               function_call: {
                 name: item.name || '',
-                arguments: item.arguments || '{}',
+                arguments: item.type === 'custom_tool_call' ? JSON.stringify({ input: item.input || '' }) : item.arguments || '{}',
               },
             },
           ],
         });
-      } else if (item.type === 'function_call_output') {
+      } else if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
         messages.push({
           role: 'tool',
           content: functionCallOutputBlocks(item.output),
@@ -134,6 +134,10 @@ export function toTraeRequest(body, model, ids = {}) {
     if (!tool) continue;
     if (tool.type === 'function') {
       tools.push(toTraeTool(tool.name, tool.description, tool.parameters));
+    } else if (tool.type === 'custom') {
+      const format = tool.format ? `\nInput format: ${JSON.stringify(tool.format)}` : '';
+      tools.push(toTraeTool(tool.name, `${tool.description || ''}${format}\nReturn the complete freeform tool input in the input field.`,
+        { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] }));
     } else if (tool.type === 'namespace' && Array.isArray(tool.tools)) {
       for (const child of tool.tools) {
         if (!child || child.type !== 'function') continue;
@@ -231,6 +235,21 @@ function responseObject({
 
 export async function handleOpenAiResponses(body, model, res, { signal, ids } = {}) {
   const params = toTraeRequest(body, model, ids);
+  const customNames = new Set((body.tools || []).filter((tool) => tool.type === 'custom').map((tool) => tool.name));
+  const toolItem = (id, callId, name, args, status = 'completed') => {
+    if (!customNames.has(name)) return functionCallItem(id, callId, name, args, status);
+    let input = '';
+    if (args) {
+      try {
+        const parsed = JSON.parse(args);
+        if (typeof parsed.input !== 'string') throw new Error('missing input');
+        input = parsed.input;
+      } catch {
+        throw new Error(`Invalid freeform input returned for custom tool ${name}`);
+      }
+    }
+    return { id, type: 'custom_tool_call', status, call_id: callId, name, input };
+  };
   const createdAt = Math.floor(Date.now() / 1000);
   const responseId = `resp_${Date.now().toString(36)}`;
 
@@ -250,7 +269,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
     }
     for (const call of result.toolCalls) {
       output.push(
-        functionCallItem(
+        toolItem(
           `fc_${call.index}_${Date.now().toString(36)}`,
           ensureToolId(call.id, call.index),
           call.name,
@@ -417,17 +436,15 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   const closeToolItem = (tool) => {
     if (!tool || tool.closed) return;
     tool.closed = true;
-    send('response.function_call_arguments.done', {
-      item_id: tool.itemId,
-      output_index: tool.outputIndex,
-      arguments: tool.args,
-    });
-    const item = functionCallItem(
-      tool.itemId,
-      tool.callId,
-      tool.name,
-      tool.args,
-    );
+    const item = toolItem(tool.itemId, tool.callId, tool.name, tool.args);
+    if (item.type === 'custom_tool_call') {
+      send('response.custom_tool_call_input.delta', { item_id: tool.itemId, output_index: tool.outputIndex, delta: item.input });
+      send('response.custom_tool_call_input.done', { item_id: tool.itemId, output_index: tool.outputIndex, input: item.input });
+    } else {
+      send('response.function_call_arguments.done', {
+        item_id: tool.itemId, output_index: tool.outputIndex, arguments: tool.args,
+      });
+    }
     send('response.output_item.done', { output_index: tool.outputIndex, item });
     outputItems.push({ outputIndex: tool.outputIndex, item });
   };
@@ -506,7 +523,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           activeToolItems.set(event.index, tool);
           send('response.output_item.added', {
             output_index: outputIndex,
-            item: functionCallItem(
+            item: toolItem(
               itemId,
               tool.callId,
               tool.name,
@@ -520,11 +537,13 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           const tool = activeToolItems.get(event.index);
           if (!tool) break;
           tool.args += event.delta;
-          send('response.function_call_arguments.delta', {
-            item_id: tool.itemId,
-            output_index: tool.outputIndex,
-            delta: event.delta,
-          });
+          if (!customNames.has(tool.name)) {
+            send('response.function_call_arguments.delta', {
+              item_id: tool.itemId,
+              output_index: tool.outputIndex,
+              delta: event.delta,
+            });
+          }
           break;
         }
         case 'tool_end': {

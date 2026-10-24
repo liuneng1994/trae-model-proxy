@@ -270,6 +270,15 @@ export function toCodexCatalog(models) {
       if (raw.model_messages && typeof raw.model_messages === 'object') {
         entry.model_messages = raw.model_messages;
       }
+      const hasInstructionsTemplate =
+        typeof raw.model_messages?.instructions_template === 'string' &&
+        raw.model_messages.instructions_template.trim().length > 0;
+      if (typeof raw.base_instructions === 'string' && raw.base_instructions.trim()) {
+        entry.base_instructions = raw.base_instructions;
+      } else if (!hasInstructionsTemplate) {
+        entry.base_instructions =
+          'You are a coding agent. Follow the user instructions and use the provided tools when needed.';
+      }
       for (const key of CODEX_OPTIONAL_FIELDS) {
         if (raw[key] !== undefined) entry[key] = raw[key];
       }

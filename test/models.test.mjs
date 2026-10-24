@@ -216,4 +216,34 @@ test('builds a Codex catalog with required fields', () => {
   assert.equal(first.default_reasoning_level, 'high');
   assert.ok(first.supported_reasoning_levels.length > 0);
   assert.ok(Array.isArray(first.input_modalities));
+  assert.match(first.base_instructions, /coding agent/);
+});
+
+test('Codex catalog preserves instruction metadata and only defaults when absent', () => {
+  const withTemplate = {
+    ...models[0],
+    raw: {
+      ...models[0].raw,
+      model_messages: {
+        instructions_template: 'Catalog instructions for {{ model }}',
+        instructions_variables: { model: 'Seed' },
+      },
+    },
+  };
+  const withBaseInstructions = {
+    ...models[0],
+    slug: 'Seed-With-Instructions',
+    id: 'trae/Seed-With-Instructions',
+    raw: {
+      ...models[0].raw,
+      base_instructions: 'Use the model-specific instructions.',
+    },
+  };
+  const catalog = toCodexCatalog([withTemplate, withBaseInstructions]);
+  const templateEntry = catalog.models.find((entry) => entry.slug === withTemplate.id);
+  const baseEntry = catalog.models.find((entry) => entry.slug === withBaseInstructions.id);
+
+  assert.deepEqual(templateEntry.model_messages, withTemplate.raw.model_messages);
+  assert.equal('base_instructions' in templateEntry, false);
+  assert.equal(baseEntry.base_instructions, withBaseInstructions.raw.base_instructions);
 });

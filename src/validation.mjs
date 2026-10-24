@@ -1,3 +1,5 @@
+import { isWebSearchTool } from './tools/web-search.mjs';
+
 export const capabilities = {
   protocols: ['chat.completions', 'responses', 'messages'],
   streaming: true,
@@ -11,6 +13,7 @@ export const capabilities = {
   server_side_state: false,
   structured_outputs: 'emulated',
   hosted_tools: false,
+  web_search: 'trae',
   sampling_parameters: false,
   stop_sequences: 'emulated',
   signed_thinking: false,
@@ -67,15 +70,33 @@ export function validateRequest(body, protocol) {
   if (body.audio || body.modalities?.some((value) => value !== 'text')) reject('Audio output is not supported');
   if (body.tool_choice !== undefined) {
     const choice = body.tool_choice;
-    const allowed = protocol === 'anthropic' ? ['auto', 'none', 'any', 'tool'] : ['auto', 'none', 'required', 'function'];
+    const allowed = protocol === 'anthropic' ? ['auto', 'none', 'any', 'tool'] : ['auto', 'none', 'required', 'function', ...(protocol === 'responses' ? ['custom'] : [])];
     const type = typeof choice === 'string' ? choice : choice?.type;
     if (!allowed.includes(type)) reject('Unsupported tool_choice');
   }
   if (body.tools !== undefined) {
     if (!Array.isArray(body.tools)) reject('tools must be an array');
+    if (protocol === 'anthropic' && body.tools.some(isWebSearchTool) &&
+        body.tools.filter((tool) => tool?.name === 'web_search').length !== 1) {
+      reject('web_search must have a unique tool name');
+    }
     for (const tool of body.tools) {
       if (!tool || typeof tool !== 'object') reject('Each tool must be an object');
-      if (protocol === 'responses' && tool.type === 'namespace') {
+      if (protocol === 'anthropic' && isWebSearchTool(tool)) {
+        if (tool.max_uses !== undefined && (!Number.isInteger(tool.max_uses) || tool.max_uses < 1 || tool.max_uses > 20)) {
+          reject('web_search max_uses must be an integer from 1 to 20');
+        }
+        if (tool.allowed_domains && tool.blocked_domains) reject('web_search cannot combine allowed_domains and blocked_domains');
+        for (const key of ['allowed_domains', 'blocked_domains']) {
+          if (tool[key] !== undefined && (!Array.isArray(tool[key]) || tool[key].some((domain) =>
+            typeof domain !== 'string' || !/^[a-z0-9.-]+$/i.test(domain)))) {
+            reject(`web_search ${key} must be an array of domain names`);
+          }
+        }
+      } else if (protocol === 'responses' && tool.type === 'custom') {
+        if (typeof tool.name !== 'string' || !tool.name.trim()) reject('Custom tools require a name');
+        if (tool.format && !['text', 'grammar'].includes(tool.format.type)) reject('Unsupported custom tool format');
+      } else if (protocol === 'responses' && tool.type === 'namespace') {
         if (typeof tool.name !== 'string' || !Array.isArray(tool.tools)) reject('Namespace tools require a name and tools array');
         for (const child of tool.tools) {
           if (child?.type !== 'function' || !child.name) reject('Only function tools are supported inside namespaces');
@@ -106,7 +127,7 @@ export function validateRequest(body, protocol) {
     if (typeof body.input !== 'string' && !Array.isArray(body.input)) reject('input must be a string or array');
     for (const item of Array.isArray(body.input) ? body.input : []) {
       if (!item || typeof item !== 'object') reject('Each input item must be an object');
-      if (item.type && !['message', 'function_call', 'function_call_output', 'reasoning'].includes(item.type)) {
+      if (item.type && !['message', 'function_call', 'function_call_output', 'custom_tool_call', 'custom_tool_call_output', 'reasoning'].includes(item.type)) {
         reject(`Input type "${item.type}" is not supported`);
       }
       validateContent(item.content);
@@ -133,7 +154,7 @@ function validateContent(content) {
   if (!Array.isArray(content)) reject('Message content must be text or an array of content blocks');
   for (const block of content) {
     if (!block || typeof block !== 'object') reject('Content blocks must be objects');
-    if (!['text', 'input_text', 'output_text', 'image', 'image_url', 'input_image', 'tool_use', 'tool_result', 'thinking', 'tool_reference'].includes(block.type)) {
+    if (!['text', 'input_text', 'output_text', 'image', 'image_url', 'input_image', 'tool_use', 'tool_result', 'thinking', 'tool_reference', 'server_tool_use', 'web_search_tool_result'].includes(block.type)) {
       reject(`Content block type "${block.type}" is not supported`);
     }
     if (block.type === 'tool_result') validateContent(block.content);

@@ -29,6 +29,7 @@ export const config = {
   chatUrl:
     process.env.TRAE_CHAT_URL ||
     'https://copilot-cn.bytedance.net/api/ide/v2/llm_raw_chat',
+  webSearchUrl: process.env.TRAE_WEB_SEARCH_URL || 'https://copilot-cn.bytedance.net/api/ide/v1/web_search',
   accountUrl: process.env.TRAE_ACCOUNT_URL || 'https://api.enterprise.trae.cn',
   appId: process.env.TRAE_APP_ID || '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8',
   ideVersionCode: process.env.TRAE_IDE_VERSION_CODE || '20261022',

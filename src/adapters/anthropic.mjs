@@ -1,4 +1,5 @@
 import { config } from '../config.mjs';
+import { isWebSearchTool, handleWebSearchMessages, replaySearchResults } from '../tools/web-search.mjs';
 import { streamChat, completeChat } from '../upstream/trae-client.mjs';
 import {
   applyStopSequences,
@@ -113,6 +114,8 @@ export function toTraeRequest(body, model, ids = {}) {
           if (!part) continue;
           if (part.type === 'text') {
             blocks.push(textBlock(part.text || ''));
+          } else if (part.type === 'web_search_tool_result') {
+            blocks.push(textBlock(`Web search results: ${replaySearchResults(part.content)}`));
           } else if (part.type === 'tool_use') {
             const id = ensureToolId(part.id, toolCalls.length);
             if (part.name) toolNames.set(id, part.name);
@@ -176,7 +179,7 @@ export function toTraeRequest(body, model, ids = {}) {
   }
 
   const tools = (body.tools || [])
-    .filter(Boolean)
+    .filter((tool) => tool && !isWebSearchTool(tool))
     .map((tool) => toTraeTool(tool.name, tool.description, tool.input_schema));
 
   const instruction = toolChoiceInstruction(normalizeToolChoice(body.tool_choice));
@@ -242,6 +245,9 @@ function toAnthropicContent(result) {
 
 export async function handleAnthropicMessages(body, model, res, { signal, ids } = {}) {
   const params = toTraeRequest(body, model, ids);
+  if (body.tool_choice?.type !== 'none' && body.tools?.some(isWebSearchTool)) {
+    return handleWebSearchMessages(body, params, res, { signal });
+  }
   const id = `msg_${Date.now().toString(36)}`;
 
   if (!body.stream) {

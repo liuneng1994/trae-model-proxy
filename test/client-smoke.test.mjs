@@ -79,7 +79,7 @@ await test('installed Claude and Codex clients work through the real proxy with 
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '0',
       TRAE_ACCESS_TOKEN: 'synthetic-access-token', PROXY_API_KEY: 'synthetic-proxy-key',
       TRAE_PROXY_API_KEY: 'synthetic-proxy-key', TRAECLI_BIN: fakeCli,
-      TRAE_CHAT_URL: `http://127.0.0.1:${upstream.address().port}`, TRAE_HOME: root, TRAECLI_HOME: root,
+      TRAE_CHAT_URL: `http://127.0.0.1:${upstream.address().port}`, TRAE_WEB_SEARCH_URL: `http://127.0.0.1:${upstream.address().port}/mock-web-search`, TRAE_HOME: root, TRAECLI_HOME: root,
       PROXY_PORT: String(port), TRAE_MODEL_REFRESH_MS: '0', PROXY_SYNC_CODEX_CATALOG: '0' };
     delete env.CLAUDECODE;
     const proxy = spawn(process.execPath, [path.resolve('src/index.mjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -97,7 +97,7 @@ await test('installed Claude and Codex clients work through the real proxy with 
       fs.writeFileSync(path.join(codexHome, 'config.toml'), `model="trae/test"\nmodel_provider="trae_proxy"\nmodel_catalog_json=${JSON.stringify(catalogFile)}\n[model_providers.trae_proxy]\nname="TRAE Proxy"\nbase_url="http://127.0.0.1:${port}/v1"\nwire_api="responses"\nenv_key="TRAE_PROXY_API_KEY"\n`);
       const clients = [
         { bin: 'claude', args: ['--bare', '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence', '--permission-prompts', 'none', '--allowedTools', 'Read', '--tools', 'Read', '--model', 'trae/test', '-p', 'Read the local input.txt if asked, then reply CLIENT_SMOKE_OK.'] },
-        { bin: 'codex', args: ['exec', '--ephemeral', '--ignore-rules', '--skip-git-repo-check', '-s', 'read-only', '--color', 'never', 'Run pwd if asked, then reply CLIENT_SMOKE_OK.'] },
+        { bin: 'codex', args: ['exec', '--ephemeral', '--ignore-rules', '--skip-git-repo-check', '-c', 'web_search="disabled"', '-s', 'read-only', '--color', 'never', 'Run pwd if asked, then reply CLIENT_SMOKE_OK.'] },
       ];
       for (const client of clients) {
         activeClient = client.bin;
