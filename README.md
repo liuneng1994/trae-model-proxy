@@ -11,7 +11,8 @@
 | `POST /v1/responses` | Codex | OpenAI Responses API |
 | `POST /v1/messages` | Claude Code | Anthropic Messages API |
 | `POST /v1/messages/count_tokens` | Claude Code | 粗略 token 估算 |
-| `GET /healthz` | 运维 | 登录状态、模型数量、上游地址 |
+| `GET /healthz` | 运维 | 就绪检查；登录或模型目录不可用时返回 503 |
+| `GET /v1/capabilities` | 通用 | 当前代理支持的能力和兼容性限制 |
 
 ## 工作原理
 
@@ -99,7 +100,7 @@ npm run setup
 - 默认推理强度 `xhigh`
 - Claude auto mode 使用客户端 classifier，不探测 TRAE 上游不支持的 server-side classifier
 - 所有 subagent、teammate 和 workflow agent 强制使用 `trae/GPT-5.6-Sol-max`
-- 使用 fullscreen TUI、auto memory、700K auto-compact window 和 Codegraph prompt hook
+- 使用 fullscreen TUI、auto memory 和 700K auto-compact window
 - 启用 `aws-serverless`、`frontend-design` 两个已安装的官方插件
 - 修改前自动备份原配置
 
@@ -124,12 +125,16 @@ npm run setup -- --dry-run
 npm run setup:uninstall
 ```
 
-如果设置了代理 API key：
+新安装会写入私有的 `.trae-model-proxy-install.json` 清单。卸载仅恢复仍由代理管理的配置值，保留安装后用户自行修改的值、其他 hooks 和权限。已有冲突配置需要显式 `--force`；旧版本没有安装清单时，应从 `.bak.*` 手动恢复，不能推断原配置。
+
+如果设置了代理 API key，推荐通过环境变量传入，避免密钥出现在命令行参数和 shell 历史中：
 
 ```bash
-npm run setup -- --api-key my-secret
-# Codex 需要按提示 export TRAE_PROXY_API_KEY=my-secret
+export TRAE_PROXY_API_KEY=my-secret
+npm run setup
 ```
+
+`--api-key` 仍兼容，但不推荐；配置预览会脱敏密钥。
 
 支持的选项：
 
@@ -295,7 +300,12 @@ TRAE 的 `llm_raw_chat` 不实现 Anthropic 的 `safeguards` / `safeguard_result
 会按照 [Claude Code 官方建议](https://code.claude.com/docs/en/auto-mode-classifier-billing)
 设置 `CLAUDE_CODE_AUTO_MODE_SERVER=0`：auto mode 继续正常
 工作并直接使用 Claude Code 客户端 classifier，同时避免每个新会话先进行一次必然失败的
-server-side classifier 探测和兼容性提示。classifier 请求仍会像以前一样使用 TRAE 模型额度。
+server-side classifier 探测和兼容性提示。客户端 classifier 仍会调用模型，因此 `npm run setup`
+同时设置 `CLAUDE_CODE_AUTO_MODE_MODEL` 和 `CLAUDE_CODE_BG_CLASSIFIER_MODEL` 指向本地
+small/fast 模型（默认 `trae/DeepSeek-V4-Flash-max`），避免验证请求占用主模型额度。
+
+`/auto-mode-setup` 和 Claude Code hooks 会使用结构化输出。代理会把客户端提供的
+JSON Schema 转成系统指令，由模型按 schema 输出 JSON；这是模拟实现，不是上游原生能力。
 
 ## 测试
 
@@ -303,7 +313,15 @@ server-side classifier 探测和兼容性提示。classifier 请求仍会像以�
 npm test
 ```
 
-当前覆盖 SSE 分片解析、三种协议的请求转换、模型/别名解析、Codex 目录生成、429 重试、队列解析、指标和安全比较。
+测试包括 SSE 的 LF/CRLF/CR 和 UTF-8 分片、协议请求与流式/非流式响应、模型 Standard/Max 元数据、凭证过期、截断/限流/超时、HTTP 鉴权与参数验证，以及隔离配置的部署生命周期测试。所有默认测试使用本地 mock，不调用真实 TRAE 上游。
+
+本机已安装 Claude Code 和 Codex 时，可额外运行客户端测试：
+
+```bash
+npm run test:clients
+```
+
+该测试使用临时客户端配置和本地 mock 上游，验证实际客户端文本和工具往返，不修改真实用户配置。客户端版本不同可能需要调整工具契约；mock 通过不能证明真实上游支持所有模型和参数。
 
 ## 可观测性
 
@@ -326,14 +344,15 @@ npm run doctor                        # 代理、Codex、Claude 配置体检
 | --- | --- | --- |
 | `PROXY_HOST` | `127.0.0.1` | 监听地址 |
 | `PROXY_PORT` | `8787` | 监听端口 |
-| `PROXY_API_KEY` | 空 | 非空时要求客户端携带 Bearer / x-api-key |
+| `PROXY_API_KEY` | 空 | 非空时除 `/healthz` 和 OPTIONS 外，所有接口要求 Bearer / x-api-key |
 | `TRAE_DEFAULT_MODEL` | `DeepSeek-V4.1-Flash` | 未指定 model 时的默认模型 |
 | `TRAE_MAX_MODE` | `1` | 旧别名/裸模型名默认路由到 max variant；显式 `trae/<模型>` 始终为 standard，`trae/<模型>-max` 始终为 Max |
 | `TRAE_CHAT_URL` | `https://copilot-cn.bytedance.net/api/ide/v2/llm_raw_chat` | TRAE 模型网关地址 |
 | `TRAE_ACCESS_TOKEN` | 空 | 覆盖 `auth.json` 中的 access token |
 | `TRAE_AUTH_FILE` | `~/.trae/cli/auth.json` | TRAE 登录凭证路径 |
 | `TRAECLI_BIN` | `traecli` | 用于读取模型目录 |
-| `PROXY_REQUEST_TIMEOUT_MS` | `300000` | 上游请求超时 |
+| `PROXY_REQUEST_TIMEOUT_MS` | `300000` | 整个生成请求超时 |
+| `TRAE_UPSTREAM_HEADERS_TIMEOUT_MS` | `30000` | 等待上游响应头超时；与整体请求超时取较小值 |
 | `TRAE_MAX_ATTEMPTS` | `3` | 上游 429/5xx 最大尝试次数 |
 | `TRAE_RETRY_BASE_MS` | `500` | 重试退避基数 |
 | `TRAE_RETRY_MAX_MS` | `10000` | 单次重试最大等待 |
@@ -363,11 +382,30 @@ TRAE_API_BASE_URL=http://127.0.0.1:8788 traecli exec -m Seed-2.1-Turbo "reply OK
 - `tool_choice` 会转换成系统指令，不是原生上游字段；强制工具调用的确定性弱于原生支持。
 - `/v1/messages/count_tokens` 是启发式估算，不是精确 tokenizer。
 - Access token 过期后需要手动执行 `traecli login`，代理不会自动刷新。
-- 上游返回 429 / 5xx 会自动重试；4019 等风控错误不会重试。
+- 上游返回 429 / 5xx 会在未输出内容时自动重试，并遵循有上限的 `Retry-After`；输出后出错不重试。未收到 `done` 的截断流返回错误，不会伪装成功。
+- Responses 输出达到 token 上限时返回 `status: incomplete`、`incomplete_details.reason: max_output_tokens`；流式发送 `response.incomplete`。
+- 采样参数（`temperature` / `top_p` 等）、`n > 1`、结构化输出、Responses 服务端历史/存储及 hosted tools 未实现；明确返回 400，不再静默忽略。
+- stop 序列（`stop` / `stop_sequences`，最多 4 个）由代理在输出侧模拟：命中第一个序列后截断文本，Anthropic 返回 `stop_reason: "stop_sequence"`，OpenAI 返回 `finish_reason: "stop"`。
+- reasoning/thinking 是上游推理文本的兼容摘要，不是 Anthropic 原生签名 thinking。
 - 本工具只适合本机个人使用，默认只监听 `127.0.0.1`，不要直接暴露到公网。
+
+## macOS 锁屏与休眠恢复
+
+锁屏本身不会停止 LaunchAgent，但系统休眠会暂停进程和网络。`KeepAlive` 只能重启退出的进程，不能恢复暂停期间已经失效的请求。
+
+代理检测到 30 秒以上的执行间隔时，会取消旧请求并记录 `runtime.resumed`，客户端需要重新发起请求；不会重放已输出的内容。上游请求使用非复用连接，等待响应头默认最多 30 秒，降低唤醒后旧连接卡住的影响。`/healthz.runtime` 返回活动请求数和最近恢复记录。长时间事件循环阻塞也会触发这项保护，它不是原生 macOS 唤醒通知。
+
+排查时先运行：
+
+```bash
+curl --max-time 10 http://127.0.0.1:8787/healthz
+npm run service:status
+```
+
+若需清理当前运行进程中的旧连接，可运行 `npm run service:restart`（会中断正在进行的请求）。已运行的服务不会自动加载源码改动，更新后需要重启。真实锁屏/休眠恢复仍需在本机验证；本地 mock 只能验证取消和重连逻辑。
 
 ## 安全说明
 
 - 代理不会把 access token 写入日志或响应。
-- 抓包脚本会对 `authorization`、cookie 等敏感头做脱敏。
+- 抓包脚本会对 `authorization`、cookie 等敏感头及敏感 query 参数做脱敏；目录为 0700，文件为 0600。请求/响应 body 仍包含原始 prompt、工具参数及可能的业务敏感信息，不会自动脱敏。
 - 建议保持 `PROXY_API_KEY` 非空，尤其是在共享机器或容器中运行。

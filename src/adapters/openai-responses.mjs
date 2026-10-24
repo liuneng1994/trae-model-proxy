@@ -1,10 +1,14 @@
 import { config } from '../config.mjs';
 import { streamChat, completeChat } from '../upstream/trae-client.mjs';
 import {
+  applyStopSequences,
   asText,
+  createStopSequenceFilter,
   ensureToolId,
   mapUsageToResponses,
   normalizeReasoningEffort,
+  normalizeStopSequences,
+  structuredOutputInstructionFor,
   textBlock,
   toTraeTool,
   toolChoiceInstruction,
@@ -27,6 +31,35 @@ function responseContentBlocks(content) {
     }
   }
   return blocks.length ? blocks : [textBlock('')];
+}
+
+function functionCallOutputBlocks(output) {
+  if (typeof output === 'string') return [textBlock(output)];
+  if (Array.isArray(output)) {
+    const blocks = [];
+    for (const part of output) {
+      if (typeof part === 'string') {
+        blocks.push(textBlock(part));
+      } else if (
+        part &&
+        (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text')
+      ) {
+        blocks.push(textBlock(part.text || ''));
+      } else if (part?.type === 'input_image') {
+        blocks.push({
+          type: 'image_url',
+          image_url: { url: part.image_url || part.url || '' },
+        });
+      } else if (part && typeof part === 'object') {
+        blocks.push(textBlock(JSON.stringify(part)));
+      } else if (part != null) {
+        blocks.push(textBlock(String(part)));
+      }
+    }
+    return blocks.length ? blocks : [textBlock('')];
+  }
+  if (output && typeof output === 'object') return [textBlock(JSON.stringify(output))];
+  return [textBlock(output == null ? '' : String(output))];
 }
 
 function lastUserInput(messages) {
@@ -64,7 +97,7 @@ export function toTraeRequest(body, model, ids = {}) {
   } else if (Array.isArray(input)) {
     for (const item of input) {
       if (!item) continue;
-      if (item.type === 'message') {
+      if (item.type === 'message' || (!item.type && item.role)) {
         const role = item.role === 'developer' ? 'system' : item.role;
         messages.push({ role, content: responseContentBlocks(item.content) });
       } else if (item.type === 'function_call') {
@@ -88,7 +121,7 @@ export function toTraeRequest(body, model, ids = {}) {
       } else if (item.type === 'function_call_output') {
         messages.push({
           role: 'tool',
-          content: [textBlock(asText(item.output))],
+          content: functionCallOutputBlocks(item.output),
           name: toolNames.get(item.call_id) || 'tool',
           tool_call_id: item.call_id || '',
         });
@@ -96,13 +129,28 @@ export function toTraeRequest(body, model, ids = {}) {
     }
   }
 
-  const tools = (body.tools || [])
-    .filter((tool) => tool && tool.type === 'function')
-    .map((tool) => toTraeTool(tool.name, tool.description, tool.parameters));
+  const tools = [];
+  for (const tool of body.tools || []) {
+    if (!tool) continue;
+    if (tool.type === 'function') {
+      tools.push(toTraeTool(tool.name, tool.description, tool.parameters));
+    } else if (tool.type === 'namespace' && Array.isArray(tool.tools)) {
+      for (const child of tool.tools) {
+        if (!child || child.type !== 'function') continue;
+        const name = `${tool.name}.${child.name}`;
+        tools.push(toTraeTool(name, child.description, child.parameters));
+      }
+    }
+  }
 
   const instruction = toolChoiceInstruction(normalizeToolChoice(body.tool_choice));
   if (instruction) {
     messages.unshift({ role: 'system', content: [textBlock(instruction)] });
+  }
+
+  const formatInstruction = structuredOutputInstructionFor(body, 'responses');
+  if (formatInstruction) {
+    messages.unshift({ role: 'system', content: [textBlock(formatInstruction)] });
   }
 
   return {
@@ -113,6 +161,7 @@ export function toTraeRequest(body, model, ids = {}) {
     maxTokens: body.max_output_tokens ?? config.defaultMaxTokens,
     reasoningEffort: normalizeReasoningEffort(body.reasoning?.effort),
     parallelToolCalls: body.parallel_tool_calls !== false,
+    stopSequences: normalizeStopSequences(body.stop ?? body.stop_sequences),
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,
   };
@@ -139,7 +188,34 @@ function functionCallItem(id, callId, name, args, status = 'completed') {
   };
 }
 
-function responseObject({ id, createdAt, model, status, output, usage, error }) {
+function responseCompletion(finishReason) {
+  if (finishReason === 'length') {
+    return {
+      event: 'response.incomplete',
+      status: 'incomplete',
+      incompleteDetails: { reason: 'max_output_tokens' },
+    };
+  }
+  if (finishReason === 'content_filter') {
+    return {
+      event: 'response.incomplete',
+      status: 'incomplete',
+      incompleteDetails: { reason: 'content_filter' },
+    };
+  }
+  return { event: 'response.completed', status: 'completed', incompleteDetails: null };
+}
+
+function responseObject({
+  id,
+  createdAt,
+  model,
+  status,
+  output,
+  usage,
+  error,
+  incompleteDetails,
+}) {
   return {
     id,
     object: 'response',
@@ -149,6 +225,7 @@ function responseObject({ id, createdAt, model, status, output, usage, error }) 
     output,
     ...(usage ? { usage } : {}),
     ...(error ? { error } : {}),
+    ...(incompleteDetails ? { incomplete_details: incompleteDetails } : {}),
   };
 }
 
@@ -159,6 +236,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
 
   if (!body.stream) {
     const result = await completeChat(params, { signal });
+    const filtered = applyStopSequences(result.text, params.stopSequences);
     const output = [];
     if (result.reasoning) {
       output.push({
@@ -167,8 +245,8 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
         summary: [{ type: 'summary_text', text: result.reasoning }],
       });
     }
-    if (result.text) {
-      output.push(messageItem(`msg_${Date.now().toString(36)}`, result.text));
+    if (filtered.text) {
+      output.push(messageItem(`msg_${Date.now().toString(36)}`, filtered.text));
     }
     for (const call of result.toolCalls) {
       output.push(
@@ -180,11 +258,15 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
         ),
       );
     }
+    const completion = responseCompletion(
+      filtered.stopped && !result.toolCalls.length ? 'stop' : result.finishReason,
+    );
     return responseObject({
       id: responseId,
       createdAt,
       model: body.model,
-      status: 'completed',
+      status: completion.status,
+      incompleteDetails: completion.incompleteDetails,
       output,
       usage: mapUsageToResponses(result.usage),
     });
@@ -206,10 +288,13 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   let messageText = '';
   let nextOutputIndex = 0;
   let usage = null;
+  let finishReason = 'stop';
   let queueItem = null;
   let modelReasoningItem = null;
-  const toolItems = new Map();
+  const activeToolItems = new Map();
+  const toolItems = [];
   const outputItems = [];
+  const stopFilter = createStopSequenceFilter(params.stopSequences);
 
   const inProgress = responseObject({
     id: responseId,
@@ -329,6 +414,24 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
     outputItems.push({ outputIndex: modelReasoningItem.outputIndex, item });
   };
 
+  const closeToolItem = (tool) => {
+    if (!tool || tool.closed) return;
+    tool.closed = true;
+    send('response.function_call_arguments.done', {
+      item_id: tool.itemId,
+      output_index: tool.outputIndex,
+      arguments: tool.args,
+    });
+    const item = functionCallItem(
+      tool.itemId,
+      tool.callId,
+      tool.name,
+      tool.args,
+    );
+    send('response.output_item.done', { output_index: tool.outputIndex, item });
+    outputItems.push({ outputIndex: tool.outputIndex, item });
+  };
+
   try {
     for await (const event of streamChat(params, { signal })) {
       switch (event.type) {
@@ -367,37 +470,46 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           });
           break;
         }
-        case 'text':
-          closeQueueItem();
-          closeModelReasoningItem();
-          ensureMessage();
-          messageText += event.delta;
-          send('response.output_text.delta', {
-            item_id: messageId,
-            output_index: messageOutputIndex,
-            content_index: 0,
-            delta: event.delta,
-          });
+        case 'text': {
+          const { text } = stopFilter.push(event.delta);
+          if (text) {
+            closeQueueItem();
+            closeModelReasoningItem();
+            ensureMessage();
+            messageText += text;
+            send('response.output_text.delta', {
+              item_id: messageId,
+              output_index: messageOutputIndex,
+              content_index: 0,
+              delta: text,
+            });
+          }
           break;
+        }
         case 'tool_start': {
           closeQueueItem();
           closeModelReasoningItem();
+          closeToolItem(activeToolItems.get(event.index));
           const itemId = `fc_${event.index}_${Date.now().toString(36)}`;
           const outputIndex = nextOutputIndex;
           nextOutputIndex += 1;
-          toolItems.set(event.index, {
+          const tool = {
+            sourceIndex: event.index,
             itemId,
             outputIndex,
             callId: ensureToolId(event.id, event.index),
             name: event.name || '',
             args: '',
-          });
+            closed: false,
+          };
+          toolItems.push(tool);
+          activeToolItems.set(event.index, tool);
           send('response.output_item.added', {
             output_index: outputIndex,
             item: functionCallItem(
               itemId,
-              toolItems.get(event.index).callId,
-              event.name || '',
+              tool.callId,
+              tool.name,
               '',
               'in_progress',
             ),
@@ -405,7 +517,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           break;
         }
         case 'tool_args': {
-          const tool = toolItems.get(event.index);
+          const tool = activeToolItems.get(event.index);
           if (!tool) break;
           tool.args += event.delta;
           send('response.function_call_arguments.delta', {
@@ -415,12 +527,40 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
           });
           break;
         }
+        case 'tool_end': {
+          const tool = activeToolItems.get(event.index);
+          if (tool && !tool.closed) {
+            if (event.id) tool.callId = event.id;
+            if (event.name) tool.name = event.name;
+            closeToolItem(tool);
+            activeToolItems.delete(event.index);
+          }
+          break;
+        }
         case 'usage':
           usage = event.usage;
+          break;
+        case 'done':
+          finishReason =
+            stopFilter.stopped && toolItems.length === 0 ? 'stop' : event.finishReason;
           break;
         default:
           break;
       }
+    }
+
+    const tail = stopFilter.flush();
+    if (tail) {
+      closeQueueItem();
+      closeModelReasoningItem();
+      ensureMessage();
+      messageText += tail;
+      send('response.output_text.delta', {
+        item_id: messageId,
+        output_index: messageOutputIndex,
+        content_index: 0,
+        delta: tail,
+      });
     }
 
     closeQueueItem();
@@ -449,32 +589,22 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
     }
 
     for (const tool of [...toolItems.values()].sort((a, b) => a.outputIndex - b.outputIndex)) {
-      send('response.function_call_arguments.done', {
-        item_id: tool.itemId,
-        output_index: tool.outputIndex,
-        arguments: tool.args,
-      });
-      const item = functionCallItem(
-        tool.itemId,
-        tool.callId,
-        tool.name,
-        tool.args,
-      );
-      send('response.output_item.done', { output_index: tool.outputIndex, item });
-      outputItems.push({ outputIndex: tool.outputIndex, item });
+      closeToolItem(tool);
     }
 
     const output = outputItems
       .sort((a, b) => a.outputIndex - b.outputIndex)
       .map((entry) => entry.item);
 
+    const completion = responseCompletion(finishReason);
     send(
-      'response.completed',
+      completion.event,
       responseObject({
         id: responseId,
         createdAt,
         model: body.model,
-        status: 'completed',
+        status: completion.status,
+        incompleteDetails: completion.incompleteDetails,
         output,
         usage: mapUsageToResponses(usage),
       }),

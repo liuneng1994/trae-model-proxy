@@ -2,25 +2,16 @@
  * Minimal SSE parser/encoder. Works with fetch Response bodies and Node streams.
  */
 
-function boundary(buffer) {
-  const lf = buffer.indexOf('\n\n');
-  const crlf = buffer.indexOf('\r\n\r\n');
-  if (lf === -1 && crlf === -1) return null;
-  if (lf === -1) return { start: crlf, end: crlf + 4 };
-  if (crlf === -1) return { start: lf, end: lf + 2 };
-  return lf < crlf ? { start: lf, end: lf + 2 } : { start: crlf, end: crlf + 4 };
-}
-
-function parseBlock(raw) {
+function parseBlock(lines) {
   let event = 'message';
   const dataLines = [];
-  for (const line of raw.split(/\r?\n/)) {
+  for (const line of lines) {
     if (!line || line.startsWith(':')) continue;
-    if (line.startsWith('event:')) {
-      event = line.slice(6).trim();
-    } else if (line.startsWith('data:')) {
-      dataLines.push(line.slice(5).replace(/^ /, ''));
-    }
+    const colon = line.indexOf(':');
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const value = colon === -1 ? '' : line.slice(colon + 1).replace(/^ /, '');
+    if (field === 'event') event = value || 'message';
+    else if (field === 'data') dataLines.push(value);
   }
   if (!dataLines.length) return null;
   return { event, data: dataLines.join('\n') };
@@ -29,29 +20,43 @@ function parseBlock(raw) {
 export async function* parseSSE(body) {
   const decoder = new TextDecoder();
   let buffer = '';
-  for await (const chunk of body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let hit;
-    while ((hit = boundary(buffer))) {
-      const raw = buffer.slice(0, hit.start);
-      buffer = buffer.slice(hit.end);
-      const parsed = parseBlock(raw);
+  let lines = [];
+  async function* drain(final = false) {
+    let match;
+    while ((match = /\r\n|\r|\n/.exec(buffer))) {
+      // A CR at a chunk boundary may be the first half of CRLF.
+      if (!final && match[0] === '\r' && match.index === buffer.length - 1) break;
+      const line = buffer.slice(0, match.index);
+      buffer = buffer.slice(match.index + match[0].length);
+      if (line) lines.push(line);
+      else {
+        const parsed = parseBlock(lines);
+        lines = [];
+        if (parsed) yield parsed;
+      }
+    }
+    if (final) {
+      if (buffer) lines.push(buffer);
+      const parsed = parseBlock(lines);
       if (parsed) yield parsed;
     }
   }
+  for await (const chunk of body) {
+    buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+    yield* drain();
+  }
   buffer += decoder.decode();
-  const parsed = parseBlock(buffer);
-  if (parsed) yield parsed;
+  yield* drain(true);
 }
 
 export function formatSSE(event, data) {
   const payload = typeof data === 'string' ? data : JSON.stringify(data);
-  return `event: ${event}\ndata: ${payload}\n\n`;
+  return `event: ${event}\n${payload.split(/\r\n|\r|\n/).map((line) => `data: ${line}\n`).join('')}\n`;
 }
 
 export function formatSSEData(data) {
   const payload = typeof data === 'string' ? data : JSON.stringify(data);
-  return `data: ${payload}\n\n`;
+  return `${payload.split(/\r\n|\r|\n/).map((line) => `data: ${line}\n`).join('')}\n`;
 }
 
 export function isAbortError(err) {

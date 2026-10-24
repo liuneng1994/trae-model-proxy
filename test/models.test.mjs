@@ -5,6 +5,7 @@ import {
   resolveModelFromList,
   toAnthropicModels,
   toCodexCatalog,
+  toOpenAiModels,
 } from '../src/models.mjs';
 
 const models = [
@@ -174,12 +175,42 @@ test('exposes standard and max ids for every max-capable model', () => {
   assert.equal(CLAUDE_ALIASES['claude-sonnet-4-5'], 'Seed-2.1-Turbo');
 });
 
+test('OpenAI discovery metadata matches the exact model route', () => {
+  const entries = toOpenAiModels(models);
+  assert.equal(entries.length, 7);
+  for (const entry of entries) {
+    const route = resolveModelFromList(models, entry.id);
+    assert.equal(entry.context_window, route.contextWindow, entry.id);
+    assert.equal(route.variant, entry.id.endsWith('-max') ? 'max' : 'standard');
+  }
+});
+
+test('rejects partial model names instead of selecting an arbitrary backend', () => {
+  for (const id of ['trae/GPT', 'trae/GPT-5', 'trae/', 'GPT-6.1']) {
+    assert.throws(() => resolveModelFromList(models, id), /Unknown model/);
+  }
+  assert.equal(resolveModelFromList(models, 'GPT-6.1-Sol__max').variant, 'max');
+  assert.equal(resolveModelFromList(models, 'GPT-6.1-Sol__dev').variant, 'standard');
+});
+
+test('standard variant uses catalog standard backend and window', () => {
+  const entry = { ...models[1], backendModel: 'stale', contextWindow: 800000 };
+  const route = resolveModelFromList([entry], entry.id);
+  assert.equal(route.backendModel, 'GPT-6.1-Sol__dev');
+  assert.equal(route.contextWindow, 475000);
+});
+
 test('builds a Codex catalog with required fields', () => {
   const catalog = toCodexCatalog(models);
-  assert.equal(catalog.models.length, 4);
+  assert.equal(catalog.models.length, 7);
+  for (const entry of catalog.models) {
+    const route = resolveModelFromList(models, entry.slug);
+    assert.equal(entry.context_window, route.contextWindow);
+    assert.equal(entry.max_context_window, route.contextWindow);
+  }
   const first = catalog.models[0];
-  assert.equal(first.slug, 'Seed-2.1-Turbo');
-  assert.equal(first.display_name, 'TRAE · Seed-2.1-Turbo');
+  assert.equal(first.slug, 'trae/Seed-2.1-Turbo');
+  assert.equal(first.display_name, 'TRAE · Seed-2.1-Turbo · Standard');
   assert.equal(first.context_window, 200000);
   assert.equal(first.max_context_window, 200000);
   assert.equal(first.default_reasoning_level, 'high');

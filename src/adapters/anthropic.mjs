@@ -1,12 +1,16 @@
 import { config } from '../config.mjs';
 import { streamChat, completeChat } from '../upstream/trae-client.mjs';
 import {
+  applyStopSequences,
   asText,
+  createStopSequenceFilter,
   ensureToolId,
   mapStopReasonToAnthropic,
   mapUsageToAnthropic,
   normalizeReasoningEffort,
+  normalizeStopSequences,
   reasoningEffortFromBudget,
+  structuredOutputInstructionFor,
   textBlock,
   toTraeTool,
   toolChoiceInstruction,
@@ -180,6 +184,11 @@ export function toTraeRequest(body, model, ids = {}) {
     messages.unshift({ role: 'system', content: [textBlock(instruction)] });
   }
 
+  const formatInstruction = structuredOutputInstructionFor(body, 'anthropic');
+  if (formatInstruction) {
+    messages.unshift({ role: 'system', content: [textBlock(formatInstruction)] });
+  }
+
   const lastUser = [...messages].reverse().find((message) => message.role === 'user');
 
   return {
@@ -196,6 +205,7 @@ export function toTraeRequest(body, model, ids = {}) {
           ? normalizeReasoningEffort(body.output_config?.effort || 'medium')
           : config.defaultReasoningEffort,
     parallelToolCalls: true,
+    stopSequences: normalizeStopSequences(body.stop_sequences ?? body.stop),
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,
   };
@@ -211,11 +221,11 @@ function parseToolInput(raw) {
   }
 }
 
-function toAnthropicContent(result, { includeThinking = false } = {}) {
+function toAnthropicContent(result) {
   const content = [];
-  if (includeThinking && result.reasoning) {
-    content.push({ type: 'thinking', thinking: result.reasoning });
-  }
+  // TRAE exposes internal reasoning text, not Anthropic-signed thinking blocks.
+  // Do not label it as native Anthropic thinking because clients may replay those
+  // blocks and expect a valid signature bound to the original conversation.
   if (result.text) {
     content.push({ type: 'text', text: result.text });
   }
@@ -223,7 +233,7 @@ function toAnthropicContent(result, { includeThinking = false } = {}) {
     content.push({
       type: 'tool_use',
       id: ensureToolId(call.id, call.index),
-      name: call.name,
+      name: call.name || 'tool',
       input: parseToolInput(call.arguments),
     });
   }
@@ -236,37 +246,63 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
 
   if (!body.stream) {
     const result = await completeChat(params, { signal });
+    const filtered = applyStopSequences(result.text, params.stopSequences);
+    const hasToolCalls = result.toolCalls.length > 0;
+    const stopped = filtered.stopped && !hasToolCalls;
     return {
       id,
       type: 'message',
       role: 'assistant',
       model: body.model,
-      content: toAnthropicContent(result, {
-        includeThinking:
-          body.thinking?.type === 'enabled' || body.thinking?.type === 'adaptive',
-      }),
-      stop_reason: mapStopReasonToAnthropic(result.finishReason),
-      stop_sequence: null,
+      content: toAnthropicContent({ ...result, text: filtered.text }),
+      stop_reason: stopped ? 'stop_sequence' : mapStopReasonToAnthropic(result.finishReason),
+      stop_sequence: stopped ? filtered.matched : null,
       usage: mapUsageToAnthropic(result.usage),
     };
   }
 
   startSSE(res);
   const send = (event, data) => writeSSEEvent(res, event, data);
-  const thinkingEnabled =
-    body.thinking?.type === 'enabled' || body.thinking?.type === 'adaptive';
-
   let nextIndex = 0;
   let textIndex = null;
-  let thinkingIndex = null;
   let textOpen = false;
-  let thinkingOpen = false;
   let outputTokens = 0;
   let inputTokens = 0;
   let cacheReadTokens = 0;
   let cacheCreationTokens = 0;
   let stopReason = 'end_turn';
-  const toolBlocks = new Map();
+  let stopSequence = null;
+  const stopFilter = createStopSequenceFilter(params.stopSequences);
+  const activeToolBlocks = new Map();
+  const toolBlocks = [];
+  let nextToolToEmit = 0;
+
+  const flushClosedToolBlocks = ({ force = false } = {}) => {
+    while (nextToolToEmit < toolBlocks.length) {
+      const tool = toolBlocks[nextToolToEmit];
+      if (!force && !tool.closed) break;
+      tool.closed = true;
+      send('content_block_start', {
+        type: 'content_block_start',
+        index: tool.index,
+        content_block: {
+          type: 'tool_use',
+          id: tool.id,
+          name: tool.name,
+          input: {},
+        },
+      });
+      if (tool.args) {
+        send('content_block_delta', {
+          type: 'content_block_delta',
+          index: tool.index,
+          delta: { type: 'input_json_delta', partial_json: tool.args },
+        });
+      }
+      send('content_block_stop', { type: 'content_block_stop', index: tool.index });
+      nextToolToEmit += 1;
+    }
+  };
 
   send('message_start', {
     type: 'message_start',
@@ -282,27 +318,8 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
     },
   });
 
-  const openThinking = () => {
-    if (!thinkingEnabled || thinkingOpen) return;
-    thinkingIndex = nextIndex;
-    nextIndex += 1;
-    thinkingOpen = true;
-    send('content_block_start', {
-      type: 'content_block_start',
-      index: thinkingIndex,
-      content_block: { type: 'thinking', thinking: '' },
-    });
-  };
-
-  const closeThinking = () => {
-    if (!thinkingOpen) return;
-    thinkingOpen = false;
-    send('content_block_stop', { type: 'content_block_stop', index: thinkingIndex });
-  };
-
   const openText = () => {
     if (textOpen) return;
-    closeThinking();
     textIndex = nextIndex;
     nextIndex += 1;
     textOpen = true;
@@ -322,72 +339,72 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
   try {
     for await (const event of streamChat(params, { signal })) {
       switch (event.type) {
-        case 'queue': {
-          if (thinkingEnabled) {
-            openThinking();
+        case 'queue':
+          send('ping', { type: 'ping', queue: event.message });
+          break;
+        case 'reasoning':
+          // Internal reasoning is intentionally not emitted as Anthropic thinking:
+          // it has no provider signature and must not be replayed as a native block.
+          break;
+        case 'text': {
+          const { text, stopped, matched } = stopFilter.push(event.delta);
+          if (text) {
+            for (const tool of activeToolBlocks.values()) tool.closed = true;
+            activeToolBlocks.clear();
+            flushClosedToolBlocks({ force: true });
+            openText();
             send('content_block_delta', {
               type: 'content_block_delta',
-              index: thinkingIndex,
-              delta: {
-                type: 'thinking_delta',
-                thinking: `[TRAE queue] ${event.message}`,
-              },
+              index: textIndex,
+              delta: { type: 'text_delta', text },
             });
-          } else {
-            send('ping', { type: 'ping', queue: event.message });
+          }
+          if (stopped) {
+            stopSequence = matched;
+            stopReason = 'stop_sequence';
+            closeText();
           }
           break;
         }
-        case 'reasoning':
-          if (thinkingEnabled) {
-            openThinking();
-            send('content_block_delta', {
-              type: 'content_block_delta',
-              index: thinkingIndex,
-              delta: { type: 'thinking_delta', thinking: event.delta },
-            });
-          }
-          break;
-        case 'text':
-          openText();
-          send('content_block_delta', {
-            type: 'content_block_delta',
-            index: textIndex,
-            delta: { type: 'text_delta', text: event.delta },
-          });
-          break;
         case 'tool_start': {
           closeText();
-          closeThinking();
+          flushClosedToolBlocks();
+          const previous = activeToolBlocks.get(event.index);
+          if (previous && !previous.closed) {
+            previous.closed = true;
+            activeToolBlocks.delete(event.index);
+            flushClosedToolBlocks();
+          }
           const index = nextIndex;
           nextIndex += 1;
-          toolBlocks.set(event.index, {
+          const tool = {
+            sourceIndex: event.index,
             index,
             id: ensureToolId(event.id, event.index),
-            name: event.name || '',
+            name: event.name || 'tool',
             args: '',
-          });
-          send('content_block_start', {
-            type: 'content_block_start',
-            index,
-            content_block: {
-              type: 'tool_use',
-              id: toolBlocks.get(event.index).id,
-              name: event.name || '',
-              input: {},
-            },
-          });
+            closed: false,
+          };
+          toolBlocks.push(tool);
+          activeToolBlocks.set(event.index, tool);
           break;
         }
         case 'tool_args': {
-          const tool = toolBlocks.get(event.index);
-          if (!tool) break;
+          const tool = activeToolBlocks.get(event.index);
+          if (!tool || tool.closed) break;
           tool.args += event.delta;
-          send('content_block_delta', {
-            type: 'content_block_delta',
-            index: tool.index,
-            delta: { type: 'input_json_delta', partial_json: event.delta },
-          });
+          break;
+        }
+        case 'tool_end': {
+          const tool = activeToolBlocks.get(event.index);
+          if (!tool || tool.closed) break;
+          // Anthropic requires id/name in content_block_start, so late metadata
+          // cannot be patched on the wire. Arguments are still preserved.
+          tool.closed = true;
+          if (event.id) tool.id = event.id;
+          if (event.name) tool.name = event.name;
+          activeToolBlocks.delete(event.index);
+          flushClosedToolBlocks();
           break;
         }
         case 'usage': {
@@ -399,22 +416,31 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
           break;
         }
         case 'done':
-          stopReason = mapStopReasonToAnthropic(event.finishReason);
+          stopReason =
+            stopFilter.stopped && toolBlocks.length === 0
+              ? 'stop_sequence'
+              : mapStopReasonToAnthropic(event.finishReason);
           break;
         default:
           break;
       }
     }
 
-    closeText();
-    closeThinking();
-    for (const tool of toolBlocks.values()) {
-      send('content_block_stop', { type: 'content_block_stop', index: tool.index });
+    const tail = stopFilter.flush();
+    if (tail) {
+      openText();
+      send('content_block_delta', {
+        type: 'content_block_delta',
+        index: textIndex,
+        delta: { type: 'text_delta', text: tail },
+      });
     }
+    closeText();
+    flushClosedToolBlocks({ force: true });
 
     send('message_delta', {
       type: 'message_delta',
-      delta: { stop_reason: stopReason, stop_sequence: null },
+      delta: { stop_reason: stopReason, stop_sequence: stopSequence },
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,

@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { toTraeRequest as chatToTrae } from '../src/adapters/openai-chat.mjs';
 import { toTraeRequest as responsesToTrae } from '../src/adapters/openai-responses.mjs';
 import { toTraeRequest as anthropicToTrae } from '../src/adapters/anthropic.mjs';
+import {
+  applyStopSequences,
+  createStopSequenceFilter,
+  normalizeStopSequences,
+} from '../src/adapters/common.mjs';
 
 const model = {
   slug: 'Seed-2.1-Turbo',
@@ -202,6 +207,51 @@ test('Anthropic keeps image blocks inside tool_result', () => {
   assert.equal(toolMessage.content[1].text, 'image loaded');
 });
 
+test('Responses preserves structured and image function outputs', () => {
+  const request = responsesToTrae(
+    {
+      input: [
+        { type: 'function_call', call_id: 'call_obj', name: 'inspect', arguments: '{}' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_obj',
+          output: { ok: true, count: 2 },
+        },
+        { type: 'function_call', call_id: 'call_img', name: 'vision', arguments: '{}' },
+        {
+          type: 'function_call_output',
+          call_id: 'call_img',
+          output: [
+            { type: 'input_text', text: 'caption' },
+            { type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=' },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: 'namespace',
+          name: 'browser',
+          tools: [
+            {
+              type: 'function',
+              name: 'open',
+              description: 'open a page',
+              parameters: { type: 'object', properties: {} },
+            },
+          ],
+        },
+      ],
+    },
+    model,
+  );
+
+  const toolMessages = request.messages.filter((message) => message.role === 'tool');
+  assert.equal(toolMessages[0].content[0].text, '{"ok":true,"count":2}');
+  assert.equal(toolMessages[1].content[0].text, 'caption');
+  assert.equal(toolMessages[1].content[1].type, 'image_url');
+  assert.equal(request.tools[0].function.name, 'browser.open');
+});
+
 test('Anthropic preserves ToolSearch references as non-empty tool output', () => {
   const request = anthropicToTrae(
     {
@@ -245,4 +295,65 @@ test('Anthropic preserves ToolSearch references as non-empty tool output', () =>
   const toolMessage = request.messages.find((message) => message.role === 'tool');
   assert.equal(toolMessage.tool_call_id, 'call_search');
   assert.equal(toolMessage.content[0].text, 'Tool loaded: mcp__codegraph__codegraph_explore');
+});
+
+function formatInstruction(request) {
+  const system = request.messages.find((message) => message.role === 'system');
+  return system?.content?.map((block) => block.text).join('\n') || '';
+}
+
+test('normalizes stop sequences and truncates text at the first match', () => {
+  assert.deepEqual(normalizeStopSequences('END'), ['END']);
+  assert.deepEqual(normalizeStopSequences(undefined), []);
+  assert.deepEqual(applyStopSequences('hello END world', ['END']), {
+    text: 'hello ',
+    stopped: true,
+    matched: 'END',
+  });
+  assert.deepEqual(applyStopSequences('hello world', ['END']), {
+    text: 'hello world',
+    stopped: false,
+    matched: null,
+  });
+
+  const filter = createStopSequenceFilter(['<END>']);
+  assert.deepEqual(filter.push('a<E'), { text: 'a', stopped: false, matched: null });
+  assert.deepEqual(filter.push('ND>b'), { text: '', stopped: true, matched: '<END>' });
+  assert.equal(filter.flush(), '');
+});
+
+test('adapters pass stop sequences through to the upstream request params', () => {
+  assert.deepEqual(
+    chatToTrae({ messages: [{ role: 'user', content: 'hi' }], stop: ['END'] }, model).stopSequences,
+    ['END'],
+  );
+  assert.deepEqual(
+    anthropicToTrae({ messages: [{ role: 'user', content: 'hi' }], stop_sequences: ['END'] }, model)
+      .stopSequences,
+    ['END'],
+  );
+  assert.deepEqual(
+    responsesToTrae({ input: 'hi', stop: 'END' }, model).stopSequences,
+    ['END'],
+  );
+});
+
+test('emulates structured output by adding a JSON schema system instruction', () => {
+  const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'] };
+  const chat = chatToTrae({ messages: [{ role: 'user', content: 'classify' }],
+    response_format: { type: 'json_schema', json_schema: { name: 'verdict', schema } } }, model);
+  assert.match(formatInstruction(chat), /conforms to the following JSON Schema/);
+  assert.match(formatInstruction(chat), /"verdict"/);
+
+  const responses = responsesToTrae({ input: 'classify',
+    text: { format: { type: 'json_schema', name: 'verdict', schema } } }, model);
+  assert.match(formatInstruction(responses), /"verdict"/);
+
+  const anthropic = anthropicToTrae({ messages: [{ role: 'user', content: 'classify' }],
+    output_config: { format: { type: 'json_schema', schema } } }, model);
+  assert.match(formatInstruction(anthropic), /"verdict"/);
+
+  const jsonObject = chatToTrae({ messages: [{ role: 'user', content: 'classify' }],
+    response_format: { type: 'json_object' } }, model);
+  assert.match(formatInstruction(jsonObject), /single JSON object/);
 });

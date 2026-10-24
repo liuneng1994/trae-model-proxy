@@ -26,12 +26,29 @@ import { getAuth } from '../src/auth.mjs';
 
 const PROVIDER_ID = 'trae_proxy';
 const PROVIDER_SECTION = `[model_providers.${PROVIDER_ID}]`;
-const CODEGRAPH_PERMISSION = 'mcp__codegraph__*';
-const CODEGRAPH_PROMPT_HOOK = 'codegraph prompt-hook';
 const DEFAULT_CLAUDE_PLUGINS = {
   'aws-serverless@claude-plugins-official': true,
   'frontend-design@claude-plugins-official': true,
 };
+const MANIFEST_FILE = '.trae-model-proxy-install.json';
+const MISSING = { __traeProxyMissing: true };
+const CODEX_KEYS = [
+  'model',
+  'model_provider',
+  'model_reasoning_effort',
+  'model_reasoning_summary',
+  'model_catalog_json',
+];
+const CLAUDE_PROFILE_KEYS = [
+  'model',
+  'enabledPlugins',
+  'effortLevel',
+  'modelSettings',
+  'tui',
+  'autoMemoryEnabled',
+  'skipDangerousModePermissionPrompt',
+  'theme',
+];
 const CLAUDE_ENV_KEYS = [
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN',
@@ -43,6 +60,8 @@ const CLAUDE_ENV_KEYS = [
   'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY',
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
   'CLAUDE_CODE_AUTO_MODE_SERVER',
+  'CLAUDE_CODE_AUTO_MODE_MODEL',
+  'CLAUDE_CODE_BG_CLASSIFIER_MODEL',
   'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
   'CLAUDE_CODE_SUBAGENT_MODEL',
   'CLAUDE_CODE_SUBAGENT_MODEL_FORCE',
@@ -63,7 +82,7 @@ function parseArgs(argv) {
     maxMode: envEnabled(process.env.TRAE_MAX_MODE, true),
     contextWindow: Number(process.env.TRAE_CLAUDE_CONTEXT_WINDOW) || null,
     baseUrl: process.env.TRAE_PROXY_BASE_URL || 'http://127.0.0.1:8787',
-    apiKey: process.env.TRAE_PROXY_API_KEY || '',
+    apiKey: process.env.TRAE_PROXY_API_KEY || process.env.PROXY_API_KEY || '',
     codexOnly: false,
     claudeOnly: false,
     uninstall: false,
@@ -151,7 +170,7 @@ Options:
   --no-max              Use standard TRAE model variants instead of max
   --context-window <n>  Override Claude Code context window detection
   --base-url <url>      Proxy base URL (default: http://127.0.0.1:8787)
-  --api-key <key>       Optional proxy API key
+  --api-key <key>       Proxy key (prefer TRAE_PROXY_API_KEY to avoid shell history)
   --codex-only          Configure only Codex CLI
   --claude-only         Configure only Claude Code
   --uninstall           Remove the proxy configuration
@@ -181,31 +200,69 @@ function backup(file) {
   if (!fs.existsSync(file)) return null;
   const target = `${file}.bak.${timestamp()}`;
   fs.copyFileSync(file, target);
+  fs.chmodSync(target, 0o600);
   return target;
 }
 
 function writeAtomic(file, content) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temp = `${file}.tmp.${process.pid}`;
   fs.writeFileSync(temp, content, { mode: 0o600 });
   fs.renameSync(temp, file);
+  fs.chmodSync(file, 0o600);
 }
 
-function addUnique(values, value) {
-  return [...new Set([...(Array.isArray(values) ? values : []), value])];
+function manifestPath(home) {
+  return path.join(home, MANIFEST_FILE);
 }
 
-function ensureCommandHook(settings, event, command) {
-  const hooks = { ...(settings.hooks || {}) };
-  const entries = Array.isArray(hooks[event]) ? [...hooks[event]] : [];
-  const exists = entries.some((entry) =>
-    (Array.isArray(entry?.hooks) ? entry.hooks : []).some(
-      (hook) => hook?.type === 'command' && hook.command === command,
-    ),
-  );
-  if (!exists) entries.push({ hooks: [{ type: 'command', command }] });
-  hooks[event] = entries;
-  settings.hooks = hooks;
+function readManifest(home) {
+  const file = manifestPath(home);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    throw new Error(`Cannot parse install manifest ${file}: ${err.message}`);
+  }
+}
+
+function writeManifest(home, manifest) {
+  writeAtomic(manifestPath(home), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+function valueOrMissing(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key) ? object[key] : MISSING;
+}
+
+function isMissing(value) {
+  return value?.__traeProxyMissing === true;
+}
+
+function valuesEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function restoreOwned(object, key, entry) {
+  if (!entry) return false;
+  const current = valueOrMissing(object, key);
+  if (valuesEqual(current, entry.installed)) {
+    if (isMissing(entry.original)) delete object[key];
+    else object[key] = structuredClone(entry.original);
+    return true;
+  }
+  // Restore still-owned leaves without discarding later user additions.
+  if (current && entry.installed && typeof current === 'object' &&
+      typeof entry.installed === 'object' && !Array.isArray(current) &&
+      !Array.isArray(entry.installed) && !isMissing(current) && !isMissing(entry.installed)) {
+    for (const child of Object.keys(entry.installed)) {
+      restoreOwned(current, child, {
+        original: valueOrMissing(isMissing(entry.original) ? {} : entry.original || {}, child),
+        installed: entry.installed[child],
+      });
+    }
+    if (!Object.keys(current).length && isMissing(entry.original)) delete object[key];
+  }
+  return false;
 }
 
 function autoCompactWindow(contextWindow) {
@@ -216,11 +273,6 @@ function autoCompactWindow(contextWindow) {
 }
 
 function applyClaudeProfile(settings, { model, contextWindow, effort, models = [] }) {
-  const permissions = { ...(settings.permissions || {}) };
-  permissions.allow = addUnique(permissions.allow, CODEGRAPH_PERMISSION);
-  settings.permissions = permissions;
-
-  ensureCommandHook(settings, 'UserPromptSubmit', CODEGRAPH_PROMPT_HOOK);
   settings.enabledPlugins = {
     ...(settings.enabledPlugins || {}),
     ...DEFAULT_CLAUDE_PLUGINS,
@@ -301,6 +353,34 @@ function removeTopLevel(content, key) {
   return lines.filter((line, index) => !(index < topEnd && matcher.test(line))).join('\n');
 }
 
+function topLevelValue(content, key) {
+  const lines = content ? content.split('\n') : [];
+  const firstSection = lines.findIndex((line) => /^\s*\[/.test(line));
+  const topEnd = firstSection === -1 ? lines.length : firstSection;
+  const matcher = new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(.*)$`);
+  for (let index = 0; index < topEnd; index += 1) {
+    const match = lines[index].match(matcher);
+    if (match) return match[1];
+  }
+  return MISSING;
+}
+
+function setTopLevelRaw(content, key, value) {
+  if (isMissing(value)) return removeTopLevel(content, key);
+  const lines = content ? content.split('\n') : [];
+  const firstSection = lines.findIndex((line) => /^\s*\[/.test(line));
+  const topEnd = firstSection === -1 ? lines.length : firstSection;
+  const matcher = new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=`);
+  for (let index = 0; index < topEnd; index += 1) {
+    if (matcher.test(lines[index])) {
+      lines[index] = `${key} = ${value}`;
+      return lines.join('\n');
+    }
+  }
+  lines.splice(firstSection === -1 ? lines.length : firstSection, 0, `${key} = ${value}`);
+  return lines.join('\n');
+}
+
 function codexBlock(options) {
   const lines = [
     PROVIDER_SECTION,
@@ -316,72 +396,128 @@ function codexBlock(options) {
   return lines.join('\n');
 }
 
-async function syncCodexCatalog(options) {
+async function buildCodexCatalog(options) {
   const file = path.join(codexHome(), 'trae-models.json');
-  if (options.uninstall) {
-    if (fs.existsSync(file)) {
-      if (!options.dryRun) fs.unlinkSync(file);
-      console.log(`[setup] Removed Codex model catalog: ${file}`);
-    }
-    return null;
-  }
-
-  // Fail fast instead of writing a fallback catalog when TRAE is not logged in.
   getAuth();
   const models = await listModels({ refresh: true });
   const catalog = toCodexCatalog(models);
-  if (options.dryRun) {
-    console.log(`[setup] Would write Codex model catalog: ${file} (${catalog.models.length} models)`);
-    return file;
-  }
-  writeAtomic(file, `${JSON.stringify(catalog, null, 2)}\n`);
-  console.log(`[setup] Wrote Codex model catalog: ${file} (${catalog.models.length} models)`);
-  return file;
+  return { file, content: `${JSON.stringify(catalog, null, 2)}\n`, count: catalog.models.length };
 }
 
 async function configureCodex(options) {
   const home = codexHome();
   const file = path.join(home, 'config.toml');
+  const catalogFile = path.join(home, 'trae-models.json');
   const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const manifest = readManifest(home);
   let content = existing;
 
   const range = findSectionRange(content.split('\n'), PROVIDER_SECTION);
-  if (range) {
-    const lines = content.split('\n');
-    lines.splice(range.start, range.end - range.start);
-    content = lines.join('\n');
-  }
+  const existingProvider = range
+    ? content.split('\n').slice(range.start, range.end).join('\n').trimEnd()
+    : null;
 
-  if (!options.uninstall) {
-    const catalogFile = await syncCodexCatalog(options);
-    content = upsertTopLevel(content, 'model', options.model);
-    content = upsertTopLevel(content, 'model_provider', PROVIDER_ID);
-    content = upsertTopLevel(content, 'model_reasoning_effort', options.effort);
-    content = upsertTopLevel(content, 'model_reasoning_summary', 'detailed');
-    content = upsertTopLevel(content, 'model_catalog_json', catalogFile);
-    content = `${content.trimEnd()}\n\n${codexBlock(options)}\n`;
-  } else {
-    content = removeTopLevel(content, 'model_provider');
-    content = removeTopLevel(content, 'model_catalog_json');
-    await syncCodexCatalog(options);
+  if (options.uninstall) {
+    if (manifest?.codex) {
+      for (const key of CODEX_KEYS) {
+        const entry = manifest.codex.keys?.[key];
+        if (entry && valuesEqual(topLevelValue(content, key), entry.installed)) {
+          content = setTopLevelRaw(content, key, entry.original);
+        }
+      }
+      const currentRange = findSectionRange(content.split('\n'), PROVIDER_SECTION);
+      if (currentRange) {
+        const lines = content.split('\n');
+        const current = lines.slice(currentRange.start, currentRange.end).join('\n').trimEnd();
+        if (current === manifest.codex.providerInstalled) {
+          lines.splice(currentRange.start, currentRange.end - currentRange.start);
+          content = lines.join('\n');
+          if (manifest.codex.providerOriginal) {
+            content = `${content.trimEnd()}\n\n${manifest.codex.providerOriginal}\n`;
+          }
+        }
+      }
+      if (manifest.codex.catalogOwned && fs.existsSync(catalogFile) && !options.dryRun) {
+        fs.unlinkSync(catalogFile);
+      }
+    }
     content = content.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+  } else {
+    if (existingProvider && !manifest?.codex && !options.force) {
+      throw new Error(`Refusing to overwrite existing ${PROVIDER_SECTION}; rerun with --force`);
+    }
+    const selectedModel = await resolveModel(options.model, { maxMode: options.maxMode });
+    const codexModel = proxyClaudeModelId(selectedModel, { maxMode: options.maxMode });
+    const desiredRaw = {
+      model: tomlValue(codexModel),
+      model_provider: tomlValue(PROVIDER_ID),
+      model_reasoning_effort: tomlValue(options.effort),
+      model_reasoning_summary: tomlValue('detailed'),
+      model_catalog_json: tomlValue(catalogFile),
+    };
+    if (!manifest?.codex && !options.force) {
+      for (const [key, desired] of Object.entries(desiredRaw)) {
+        const current = topLevelValue(existing, key);
+        if (!isMissing(current) && current !== desired) {
+          throw new Error(`Refusing to overwrite Codex ${key}; rerun with --force`);
+        }
+      }
+    }
+    const catalog = await buildCodexCatalog(options);
+    if (range) {
+      const lines = content.split('\n');
+      lines.splice(range.start, range.end - range.start);
+      content = lines.join('\n');
+    }
+    for (const [key, value] of Object.entries(desiredRaw)) content = setTopLevelRaw(content, key, value);
+    content = `${content.trimEnd()}\n\n${codexBlock(options)}\n`;
+    if (!options.dryRun) {
+      writeAtomic(catalog.file, catalog.content);
+      console.log(`[setup] Wrote Codex model catalog: ${catalog.file} (${catalog.count} models)`);
+      const previous = manifest?.codex;
+      const keys = {};
+      for (const key of CODEX_KEYS) {
+        keys[key] = {
+          original: previous?.keys?.[key]?.original ?? valueOrMissing(
+            Object.fromEntries(CODEX_KEYS.map((name) => [name, topLevelValue(existing, name)])),
+            key,
+          ),
+          installed: topLevelValue(content, key),
+        };
+      }
+      writeManifest(home, {
+        ...(manifest || {}),
+        version: 1,
+        codex: {
+          keys,
+          providerOriginal: previous ? previous.providerOriginal : existingProvider,
+          providerInstalled: codexBlock(options),
+          catalogOwned: true,
+        },
+      });
+    } else {
+      console.log(`[setup] Would write Codex model catalog: ${catalog.file} (${catalog.count} models)`);
+    }
   }
 
   if (content === existing) {
     console.log(`[setup] Codex already up to date: ${file}`);
-    return;
-  }
-  if (options.dryRun) {
+  } else if (options.dryRun) {
     console.log(`[setup] Would write ${file}:\n${content}`);
-    return;
+  } else {
+    const saved = backup(file);
+    writeAtomic(file, content);
+    console.log(`[setup] ${options.uninstall ? 'Removed' : 'Configured'} Codex: ${file}`);
+    if (saved) console.log(`[setup] Backup: ${saved}`);
   }
-  const saved = backup(file);
-  writeAtomic(file, content);
-  console.log(`[setup] ${options.uninstall ? 'Removed' : 'Configured'} Codex: ${file}`);
-  if (saved) console.log(`[setup] Backup: ${saved}`);
+  if (options.uninstall && manifest?.codex && !options.dryRun) {
+    const nextManifest = { ...manifest };
+    delete nextManifest.codex;
+    if (nextManifest.claude) writeManifest(home, nextManifest);
+    else fs.unlinkSync(manifestPath(home));
+  }
   if (!options.uninstall && options.apiKey) {
-    console.log('[setup] Codex uses env_key TRAE_PROXY_API_KEY. Export it before running codex:');
-    console.log(`        export TRAE_PROXY_API_KEY=${options.apiKey}`);
+    console.log('[setup] Codex uses env_key TRAE_PROXY_API_KEY; export it before running codex.');
   }
 }
 
@@ -407,8 +543,7 @@ function claudeModelFor(model, { maxMode = false } = {}) {
     .replace(/-max$/i, '');
   const alias = Object.entries(CLAUDE_ALIAS_BY_SLUG).find(([, id]) => id === slug);
   if (alias) slug = alias[0];
-  if (maxMode) return `trae/${slug}-max`;
-  return CLAUDE_ALIAS_BY_SLUG[slug] || `claude-trae-${slug}`;
+  return `trae/${slug}${maxMode ? '-max' : ''}`;
 }
 
 function claudeEnv(options, contextWindow) {
@@ -433,6 +568,10 @@ function claudeEnv(options, contextWindow) {
     // Claude Code to use its local auto-mode classifier directly instead of
     // probing an unsupported server-side classifier on every new session.
     CLAUDE_CODE_AUTO_MODE_SERVER: '0',
+    // The client-side auto-mode and background classifiers still call a model.
+    // Point them at the local small/fast model instead of the main model.
+    CLAUDE_CODE_AUTO_MODE_MODEL: smallModel,
+    CLAUDE_CODE_BG_CLASSIFIER_MODEL: smallModel,
     ...(options.maxMode
       ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextWindow) }
       : {}),
@@ -446,51 +585,48 @@ async function configureClaude(options) {
   const home = claudeHome();
   const file = path.join(home, 'settings.json');
   const gatewayCache = path.join(home, 'cache', 'gateway-models.json');
-  if (!options.uninstall && fs.existsSync(gatewayCache)) {
-    if (options.dryRun) {
-      console.log(`[setup] Would clear Claude gateway model cache: ${gatewayCache}`);
-    } else {
-      fs.unlinkSync(gatewayCache);
-      console.log(`[setup] Cleared Claude gateway model cache: ${gatewayCache}`);
-    }
-  }
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
   let settings = {};
-  if (fs.existsSync(file)) {
+  if (existing) {
     try {
-      settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+      settings = JSON.parse(existing);
     } catch (err) {
       throw new Error(`Cannot parse ${file}: ${err.message}. Fix or remove it first.`);
     }
   }
+  const original = structuredClone(settings);
+  const manifest = readManifest(home);
 
-  const env = { ...(settings.env || {}) };
-  let configuredModel = null;
-  let configuredContextWindow = null;
-  let availableModels = [];
   if (options.uninstall) {
-    for (const key of CLAUDE_ENV_KEYS) delete env[key];
+    if (manifest?.claude) {
+      const env = { ...(settings.env || {}) };
+      for (const key of CLAUDE_ENV_KEYS) restoreOwned(env, key, manifest.claude.env?.[key]);
+      if (Object.keys(env).length) settings.env = env;
+      else delete settings.env;
+      for (const key of CLAUDE_PROFILE_KEYS) restoreOwned(settings, key, manifest.claude.profile?.[key]);
+    }
   } else {
-    configuredModel = claudeModelFor(options.model, { maxMode: options.maxMode });
+    const configuredModel = claudeModelFor(options.model, { maxMode: options.maxMode });
+    if (!manifest?.claude && !options.force) {
+      const currentModel = valueOrMissing(settings, 'model');
+      if (!isMissing(currentModel) && currentModel !== configuredModel) {
+        throw new Error('Refusing to overwrite Claude model; rerun with --force');
+      }
+      for (const key of CLAUDE_ENV_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(settings.env || {}, key)) {
+          throw new Error(`Refusing to overwrite Claude env.${key}; rerun with --force`);
+        }
+      }
+    }
+    let availableModels = [];
     if (!options.contextWindow) availableModels = await listModels({ refresh: true });
     const selected = options.contextWindow
       ? { contextWindow: options.contextWindow }
       : await resolveModel(configuredModel, { maxMode: options.maxMode });
-    configuredContextWindow = selected.contextWindow || 200000;
-    Object.assign(env, claudeEnv(options, configuredContextWindow));
+    const configuredContextWindow = selected.contextWindow || 200000;
+    const env = { ...(settings.env || {}), ...claudeEnv(options, configuredContextWindow) };
     if (!options.maxMode) delete env.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
-  }
-
-  if (Object.keys(env).length) settings.env = env;
-  else delete settings.env;
-
-  if (options.uninstall) {
-    if (
-      typeof settings.model === 'string' &&
-      (settings.model.startsWith('claude-') || settings.model.startsWith('trae/'))
-    ) {
-      delete settings.model;
-    }
-  } else {
+    settings.env = env;
     settings.model = configuredModel;
     applyClaudeProfile(settings, {
       model: configuredModel,
@@ -498,22 +634,55 @@ async function configureClaude(options) {
       effort: options.effort,
       models: availableModels,
     });
+
+    if (!options.dryRun) {
+      const previous = manifest?.claude;
+      const envEntries = {};
+      const profileEntries = {};
+      for (const key of CLAUDE_ENV_KEYS) {
+        envEntries[key] = {
+          original: previous?.env?.[key]?.original ?? valueOrMissing(original.env || {}, key),
+          installed: valueOrMissing(settings.env || {}, key),
+        };
+      }
+      for (const key of CLAUDE_PROFILE_KEYS) {
+        profileEntries[key] = {
+          original: previous?.profile?.[key]?.original ?? valueOrMissing(original, key),
+          installed: valueOrMissing(settings, key),
+        };
+      }
+      writeManifest(home, { ...(manifest || {}), version: 1, claude: { env: envEntries, profile: profileEntries } });
+    }
   }
 
   const next = `${JSON.stringify(settings, null, 2)}\n`;
-  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
   if (next === existing) {
     console.log(`[setup] Claude Code already up to date: ${file}`);
-    return;
+  } else if (options.dryRun) {
+    const preview = structuredClone(settings);
+    for (const key of Object.keys(preview.env || {})) {
+      if (/token|key|secret|password/i.test(key)) preview.env[key] = '<redacted>';
+    }
+    console.log(`[setup] Would write ${file}:\n${JSON.stringify(preview, null, 2)}`);
+  } else {
+    const saved = backup(file);
+    writeAtomic(file, next);
+    console.log(`[setup] ${options.uninstall ? 'Removed' : 'Configured'} Claude Code: ${file}`);
+    if (saved) console.log(`[setup] Backup: ${saved}`);
   }
-  if (options.dryRun) {
-    console.log(`[setup] Would write ${file}:\n${next}`);
-    return;
+  if (!options.uninstall && fs.existsSync(gatewayCache)) {
+    if (options.dryRun) console.log(`[setup] Would clear Claude gateway model cache: ${gatewayCache}`);
+    else {
+      fs.unlinkSync(gatewayCache);
+      console.log(`[setup] Cleared Claude gateway model cache: ${gatewayCache}`);
+    }
   }
-  const saved = backup(file);
-  writeAtomic(file, next);
-  console.log(`[setup] ${options.uninstall ? 'Removed' : 'Configured'} Claude Code: ${file}`);
-  if (saved) console.log(`[setup] Backup: ${saved}`);
+  if (options.uninstall && manifest?.claude && !options.dryRun) {
+    const nextManifest = { ...manifest };
+    delete nextManifest.claude;
+    if (nextManifest.codex) writeManifest(home, nextManifest);
+    else fs.unlinkSync(manifestPath(home));
+  }
 }
 
 async function main() {

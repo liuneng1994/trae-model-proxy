@@ -12,7 +12,7 @@ export function sendError(res, status, message, { type = 'invalid_request_error'
   if (protocol === 'anthropic') {
     sendJson(res, status, {
       type: 'error',
-      error: { type: type === 'authentication_error' ? 'authentication_error' : 'invalid_request_error', message },
+      error: { type, message },
     });
     return;
   }

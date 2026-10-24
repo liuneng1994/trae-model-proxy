@@ -33,6 +33,32 @@ test('parses a final event without trailing blank line', async () => {
   assert.deepEqual(events, [{ event: 'message', data: 'tail' }]);
 });
 
+test('handles bare CR, split CRLF, empty data and colonless fields', async () => {
+  assert.deepEqual(await collect(['data: one\r\rdata: two\r\r']), [
+    { event: 'message', data: 'one' }, { event: 'message', data: 'two' },
+  ]);
+  assert.deepEqual(await collect(['event: output\r', '\ndata: ok\r', '\n\r', '\n']), [
+    { event: 'output', data: 'ok' },
+  ]);
+  assert.deepEqual(await collect(['event\ndata\n\n']), [{ event: 'message', data: '' }]);
+});
+
+test('decodes BOM and UTF-8 characters split across byte chunks', async () => {
+  const bytes = new TextEncoder().encode('﻿data: 中文😀\n\n');
+  async function* source() {
+    for (const byte of bytes) yield Uint8Array.of(byte);
+  }
+  const events = [];
+  for await (const event of parseSSE(source())) events.push(event);
+  assert.deepEqual(events, [{ event: 'message', data: '中文😀' }]);
+});
+
+test('encodes multiline data as repeated SSE fields', async () => {
+  assert.deepEqual(await collect([formatSSE('output', 'one\ntwo')]), [
+    { event: 'output', data: 'one\ntwo' },
+  ]);
+});
+
 test('formats SSE event and data frames', () => {
   assert.equal(formatSSE('output', { a: 1 }), 'event: output\ndata: {"a":1}\n\n');
   assert.equal(formatSSEData('x'), 'data: x\n\n');

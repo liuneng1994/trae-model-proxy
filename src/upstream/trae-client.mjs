@@ -7,12 +7,13 @@ import { setQueueState } from '../util/state.mjs';
 import { parseQueueNotice } from '../util/queue.mjs';
 
 export class UpstreamError extends Error {
-  constructor(message, { status = 502, code = null, retryable = false, cause } = {}) {
+  constructor(message, { status = 502, code = null, retryable = false, retryAfter = null, cause } = {}) {
     super(message);
     this.name = 'UpstreamError';
     this.status = status;
     this.code = code;
     this.retryable = retryable;
+    this.retryAfter = retryAfter;
     if (cause) this.cause = cause;
   }
 }
@@ -75,6 +76,7 @@ function buildHeaders() {
     'x-flow-traceparent': newTraceparent(),
     accept: 'text/event-stream',
     'content-type': 'application/json',
+    connection: 'close',
     originator: config.originator,
     'user-agent': config.userAgent,
     ...getAuthHeaders(),
@@ -132,24 +134,21 @@ function sleep(ms, signal) {
       reject(signal.reason || new Error('aborted'));
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    if (signal) {
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          reject(signal.reason || new Error('aborted'));
-        },
-        { once: true },
-      );
-    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || new Error('aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
-function retryDelayMs(attempt, response) {
-  const baseMs = Number(process.env.TRAE_RETRY_BASE_MS) || config.retryBaseMs;
-  const maxMs = Number(process.env.TRAE_RETRY_MAX_MS) || config.retryMaxMs;
-  const retryAfter = response?.headers?.get?.('retry-after');
+export function retryDelayMs(attempt, retryAfter) {
+  const baseMs = process.env.TRAE_RETRY_BASE_MS === undefined ? config.retryBaseMs : Number(process.env.TRAE_RETRY_BASE_MS);
+  const maxMs = process.env.TRAE_RETRY_MAX_MS === undefined ? config.retryMaxMs : Number(process.env.TRAE_RETRY_MAX_MS);
   if (retryAfter) {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds) && seconds >= 0) {
@@ -172,6 +171,8 @@ async function* streamChatOnce(params, { signal } = {}) {
   }
 
   let response;
+  const headersTimeout = setTimeout(() => controller.abort(new Error('upstream response headers timeout')),
+    Math.min(config.upstreamHeadersTimeoutMs, config.requestTimeoutMs));
   try {
     response = await fetch(process.env.TRAE_CHAT_URL || config.chatUrl, {
       method: 'POST',
@@ -179,13 +180,18 @@ async function* streamChatOnce(params, { signal } = {}) {
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    clearTimeout(headersTimeout);
     inc('trae_upstream_requests_total', { status: String(response.status) });
   } catch (err) {
+    clearTimeout(headersTimeout);
     clearTimeout(timeout);
     if (signal) signal.removeEventListener('abort', onAbort);
     inc('trae_upstream_errors_total', { code: 'network' });
+    const reason = controller.signal.reason;
+    const timedOut =
+      reason instanceof Error && /^upstream .*timeout$/.test(reason.message);
     throw new UpstreamError(`Failed to reach TRAE model gateway: ${err.message}`, {
-      status: 502,
+      status: timedOut ? 504 : 502,
       retryable: true,
       cause: err,
     });
@@ -201,9 +207,10 @@ async function* streamChatOnce(params, { signal } = {}) {
           ? 'TRAE rejected the access token. Run `traecli login` and retry.'
           : `TRAE model gateway returned HTTP ${status}: ${text.slice(0, 500)}`,
         {
-          status: status === 401 || status === 403 ? 401 : 502,
+          status: status === 401 || status === 403 ? 401 : status === 429 || status >= 500 ? status : 502,
           code: status,
           retryable: status === 429 || status >= 500,
+          retryAfter: response.headers.get('retry-after'),
         },
       );
     }
@@ -222,6 +229,9 @@ async function* streamChatOnce(params, { signal } = {}) {
       try {
         payload = data ? JSON.parse(data) : {};
       } catch {
+        if (['output', 'token_usage', 'done', 'error'].includes(event)) {
+          throw new UpstreamError(`Invalid JSON in upstream ${event} event`);
+        }
         payload = { raw: data };
       }
 
@@ -310,10 +320,10 @@ async function* streamChatOnce(params, { signal } = {}) {
     }
 
     if (!sawDone) {
-      for (const [index, call] of activeTools) {
-        yield { type: 'tool_end', index, id: call.id, name: call.name };
-      }
-      yield { type: 'done', finishReason: 'stop' };
+      throw new UpstreamError('TRAE stream ended before the done event', {
+        code: 'incomplete_stream',
+        retryable: true,
+      });
     }
   } finally {
     clearTimeout(timeout);
@@ -348,7 +358,7 @@ export async function* streamChat(params, { signal } = {}) {
         inc('trae_upstream_retries_total', {
           code: String(err.code || err.status || 'network'),
         });
-        const delay = retryDelayMs(attempt);
+        const delay = retryDelayMs(attempt, err.retryAfter);
         if (config.verbose) {
           console.warn(`[upstream] retry ${attempt}/${attempts} in ${delay}ms: ${err.message}`);
         }
@@ -368,6 +378,7 @@ export async function completeChat(params, { signal } = {}) {
   let metadata = null;
   const queueMessages = [];
   const toolCalls = new Map();
+  const completedTools = [];
 
   for await (const event of streamChat(params, { signal })) {
     switch (event.type) {
@@ -401,8 +412,16 @@ export async function completeChat(params, { signal } = {}) {
         call.arguments += event.delta;
         break;
       }
-      case 'tool_end':
+      case 'tool_end': {
+        const call = toolCalls.get(event.index);
+        if (call) {
+          if (event.id) call.id = event.id;
+          if (event.name) call.name = event.name;
+          completedTools.push(call);
+          toolCalls.delete(event.index);
+        }
         break;
+      }
       case 'usage':
         usage = event.usage;
         break;
@@ -421,6 +440,6 @@ export async function completeChat(params, { signal } = {}) {
     usage,
     metadata,
     queueMessages,
-    toolCalls: [...toolCalls.values()].sort((a, b) => a.index - b.index),
+    toolCalls: [...completedTools, ...toolCalls.values()].sort((a, b) => a.index - b.index),
   };
 }

@@ -6,9 +6,13 @@ function bool(value, fallback) {
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
 }
 
-function int(value, fallback) {
+function int(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined) return fallback;
   const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
+  if (!Number.isSafeInteger(n) || n < min || n > max) {
+    throw new Error(`Invalid numeric configuration "${value}": expected an integer from ${min} to ${max}`);
+  }
+  return n;
 }
 
 const home = os.homedir();
@@ -17,7 +21,7 @@ const traeCliHome = process.env.TRAECLI_HOME || path.join(traeHome, 'cli');
 
 export const config = {
   host: process.env.PROXY_HOST || '127.0.0.1',
-  port: int(process.env.PROXY_PORT, 8787),
+  port: int(process.env.PROXY_PORT, 8787, 0, 65535),
   apiKey: process.env.PROXY_API_KEY || '',
   defaultModel: process.env.TRAE_DEFAULT_MODEL || 'DeepSeek-V4.1-Flash',
   maxMode: bool(process.env.TRAE_MAX_MODE, true),
@@ -36,11 +40,12 @@ export const config = {
   version: process.env.TRAE_CLI_VERSION || '0.210.1',
   maxBodyBytes: int(process.env.PROXY_MAX_BODY_BYTES, 50 * 1024 * 1024),
   requestTimeoutMs: int(process.env.PROXY_REQUEST_TIMEOUT_MS, 300000),
+  upstreamHeadersTimeoutMs: int(process.env.TRAE_UPSTREAM_HEADERS_TIMEOUT_MS, 30000),
   maxAttempts: int(process.env.TRAE_MAX_ATTEMPTS, 3),
-  retryBaseMs: int(process.env.TRAE_RETRY_BASE_MS, 500),
-  retryMaxMs: int(process.env.TRAE_RETRY_MAX_MS, 10000),
-  modelCacheMs: int(process.env.TRAE_MODEL_CACHE_MS, 300000),
-  modelRefreshMs: int(process.env.TRAE_MODEL_REFRESH_MS, 300000),
+  retryBaseMs: int(process.env.TRAE_RETRY_BASE_MS, 500, 0),
+  retryMaxMs: int(process.env.TRAE_RETRY_MAX_MS, 10000, 0),
+  modelCacheMs: int(process.env.TRAE_MODEL_CACHE_MS, 300000, 0),
+  modelRefreshMs: int(process.env.TRAE_MODEL_REFRESH_MS, 300000, 0),
   syncCodexCatalog: bool(process.env.PROXY_SYNC_CODEX_CATALOG, true),
   codexCatalogPath:
     process.env.PROXY_CODEX_CATALOG_PATH || path.join(home, '.codex', 'trae-models.json'),

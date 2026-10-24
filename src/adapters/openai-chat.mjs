@@ -1,11 +1,14 @@
 import { config } from '../config.mjs';
 import { streamChat, completeChat } from '../upstream/trae-client.mjs';
 import {
-  asText,
+  applyStopSequences,
+  createStopSequenceFilter,
   ensureToolId,
   lastUserText,
   mapUsageToOpenAi,
   normalizeReasoningEffort,
+  normalizeStopSequences,
+  structuredOutputInstructionFor,
   textBlock,
   toTraeTool,
   toolChoiceInstruction,
@@ -95,6 +98,11 @@ export function toTraeRequest(body, model, ids = {}) {
     messages.unshift({ role: 'system', content: [textBlock(instruction)] });
   }
 
+  const formatInstruction = structuredOutputInstructionFor(body, 'openai');
+  if (formatInstruction) {
+    messages.unshift({ role: 'system', content: [textBlock(formatInstruction)] });
+  }
+
   return {
     model,
     messages,
@@ -105,6 +113,7 @@ export function toTraeRequest(body, model, ids = {}) {
       body.reasoning_effort || body.reasoning?.effort,
     ),
     parallelToolCalls: body.parallel_tool_calls !== false,
+    stopSequences: normalizeStopSequences(body.stop ?? body.stop_sequences),
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,
   };
@@ -130,6 +139,7 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
   if (!body.stream) {
     const result = await completeChat(params, { signal });
     const toolCalls = toOpenAiToolCalls(result.toolCalls);
+    const filtered = applyStopSequences(result.text, params.stopSequences);
     return {
       id,
       object: 'chat.completion',
@@ -140,10 +150,11 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
           index: 0,
           message: {
             role: 'assistant',
-            content: toolCalls ? null : result.text || '',
+            content: toolCalls ? null : filtered.text || '',
+            ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
             ...(toolCalls ? { tool_calls: toolCalls } : {}),
           },
-          finish_reason: result.finishReason,
+          finish_reason: filtered.stopped && !toolCalls ? 'stop' : result.finishReason,
         },
       ],
       usage: mapUsageToOpenAi(result.usage),
@@ -154,6 +165,8 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
   const includeUsage = Boolean(body.stream_options?.include_usage);
   let usage = null;
   let finishReason = 'stop';
+  const streamedTools = new Map();
+  const stopFilter = createStopSequenceFilter(params.stopSequences);
 
   const send = (delta, finish = null) => {
     writeSSE(
@@ -173,27 +186,37 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
   try {
     for await (const event of streamChat(params, { signal })) {
       switch (event.type) {
-        case 'text':
-          send({ content: event.delta });
+        case 'text': {
+          const { text } = stopFilter.push(event.delta);
+          if (text) send({ content: text });
           break;
+        }
         case 'reasoning':
           send({ reasoning_content: event.delta });
           break;
         case 'queue':
           send({ reasoning_content: `[TRAE queue] ${event.message}` });
           break;
-        case 'tool_start':
+        case 'tool_start': {
+          const previous = streamedTools.get(event.index);
+          if (previous) streamedTools.delete(event.index);
+          const tool = {
+            id: ensureToolId(event.id, event.index),
+            name: event.name || '',
+          };
+          streamedTools.set(event.index, tool);
           send({
             tool_calls: [
               {
                 index: event.index,
-                id: ensureToolId(event.id, event.index),
+                id: tool.id,
                 type: 'function',
-                function: { name: event.name || '', arguments: '' },
+                function: { name: tool.name, arguments: '' },
               },
             ],
           });
           break;
+        }
         case 'tool_args':
           send({
             tool_calls: [
@@ -201,16 +224,33 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
             ],
           });
           break;
+        case 'tool_end': {
+          const tool = streamedTools.get(event.index);
+          if (tool) {
+            const late = {};
+            if (event.id && event.id !== tool.id) late.id = event.id;
+            if (event.name && event.name !== tool.name) {
+              late.function = { name: event.name };
+            }
+            if (Object.keys(late).length) {
+              send({ tool_calls: [{ index: event.index, ...late }] });
+            }
+            streamedTools.delete(event.index);
+          }
+          break;
+        }
         case 'usage':
           usage = event.usage;
           break;
         case 'done':
-          finishReason = event.finishReason;
+          finishReason = stopFilter.stopped ? 'stop' : event.finishReason;
           break;
         default:
           break;
       }
     }
+    const tail = stopFilter.flush();
+    if (tail) send({ content: tail });
     send({}, finishReason);
     if (includeUsage && usage) {
       writeSSE(
@@ -233,7 +273,6 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
         res,
         JSON.stringify({ error: { message: err.message, type: 'upstream_error' } }),
       );
-      writeSSE(res, '[DONE]');
       endSSE(res);
     }
     throw err;

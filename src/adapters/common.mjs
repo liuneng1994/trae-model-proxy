@@ -117,6 +117,45 @@ export function reasoningEffortFromBudget(budgetTokens) {
   return 'high';
 }
 
+function schemaOf(format) {
+  if (!format || typeof format !== 'object') return null;
+  if (format.type === 'json_object') return { kind: 'object' };
+  if (format.type !== 'json_schema') return null;
+  const schema =
+    format.schema ??
+    format.json_schema?.schema ??
+    (format.json_schema && typeof format.json_schema === 'object' ? format.json_schema : null);
+  return { kind: 'schema', schema };
+}
+
+/**
+ * TRAE's raw chat protocol has no native structured-output field. Emulate it by
+ * asking the model, in a system message, to emit only a JSON value that matches
+ * the client's schema.
+ */
+export function structuredOutputInstruction(format) {
+  const parsed = schemaOf(format);
+  if (!parsed) return null;
+  if (parsed.kind === 'object') {
+    return 'Return a single JSON object. Output only the JSON object, with no markdown fences or surrounding text.';
+  }
+  return [
+    'Return a single JSON value that conforms to the following JSON Schema.',
+    'Output only the JSON value, with no markdown fences or surrounding text.',
+    `JSON Schema: ${JSON.stringify(parsed.schema ?? {})}`,
+  ].join('\n');
+}
+
+export function structuredOutputInstructionFor(body, protocol) {
+  const format =
+    protocol === 'anthropic'
+      ? body?.output_config?.format
+      : protocol === 'responses'
+        ? body?.text?.format ?? body?.response_format
+        : body?.response_format;
+  return structuredOutputInstruction(format);
+}
+
 export function toolChoiceInstruction(choice) {
   if (!choice) return null;
   if (choice === 'none') return 'Do not call any tools for this request. Answer directly.';
@@ -128,6 +167,90 @@ export function toolChoiceInstruction(choice) {
     return `You must call the tool "${choice.function.name}" before answering.`;
   }
   return null;
+}
+
+/**
+ * TRAE's raw chat protocol has no stop-sequence field. Emulate it client-side:
+ * normalize the client's value, then truncate generated text at the first
+ * occurrence of any sequence.
+ */
+export function normalizeStopSequences(value) {
+  if (value === undefined || value === null) return [];
+  const list = Array.isArray(value) ? value : [value];
+  return list.filter((sequence) => typeof sequence === 'string' && sequence);
+}
+
+function longestPrefixSuffix(text, sequences) {
+  let longest = 0;
+  for (const sequence of sequences) {
+    const limit = Math.min(sequence.length - 1, text.length);
+    for (let length = limit; length > longest; length -= 1) {
+      if (sequence.startsWith(text.slice(text.length - length))) {
+        longest = length;
+        break;
+      }
+    }
+  }
+  return longest;
+}
+
+/**
+ * Incremental stop-sequence filter. Text that could be the beginning of a stop
+ * sequence is held back until the next chunk disambiguates it.
+ */
+export function createStopSequenceFilter(stopSequences) {
+  const sequences = normalizeStopSequences(stopSequences);
+  let pending = '';
+  let matched = null;
+
+  return {
+    get stopped() {
+      return matched !== null;
+    },
+    get matched() {
+      return matched;
+    },
+    push(chunk) {
+      if (matched !== null || !chunk) return { text: '', stopped: matched !== null, matched };
+      pending += chunk;
+      let index = -1;
+      let sequence = null;
+      for (const candidate of sequences) {
+        const found = pending.indexOf(candidate);
+        if (found === -1) continue;
+        if (index === -1 || found < index || (found === index && candidate.length > sequence.length)) {
+          index = found;
+          sequence = candidate;
+        }
+      }
+      if (index !== -1) {
+        const text = pending.slice(0, index);
+        pending = '';
+        matched = sequence;
+        return { text, stopped: true, matched };
+      }
+      const keep = longestPrefixSuffix(pending, sequences);
+      const text = pending.slice(0, pending.length - keep);
+      pending = pending.slice(pending.length - keep);
+      return { text, stopped: false, matched: null };
+    },
+    flush() {
+      if (matched !== null) return '';
+      const text = pending;
+      pending = '';
+      return text;
+    },
+  };
+}
+
+export function applyStopSequences(text, stopSequences) {
+  const filter = createStopSequenceFilter(stopSequences);
+  const { text: head, stopped, matched } = filter.push(text || '');
+  return {
+    text: stopped ? head : head + filter.flush(),
+    stopped,
+    matched,
+  };
 }
 
 export function makeSessionIds(headerValue) {

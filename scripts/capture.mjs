@@ -14,7 +14,7 @@ import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.CAPTURE_PORT || 8788);
@@ -29,8 +29,6 @@ function upstreamFor(pathname) {
 }
 const OUT_DIR = process.env.CAPTURE_OUT || path.resolve(__dirname, '..', 'captures');
 const MAX_CAPTURE_BYTES = Number(process.env.CAPTURE_MAX_BYTES || 8 * 1024 * 1024);
-
-fs.mkdirSync(OUT_DIR, { recursive: true });
 
 const SENSITIVE_HEADERS = new Set([
   'authorization',
@@ -56,7 +54,21 @@ const HOP_BY_HOP = new Set([
   'host',
 ]);
 
-function redactHeaders(headers) {
+const SENSITIVE_QUERY = /(?:key|token|secret|password|authorization|auth|credential)/i;
+
+export function redactUrl(value) {
+  try {
+    const url = new URL(value, 'http://capture.local');
+    for (const key of [...url.searchParams.keys()]) {
+      if (SENSITIVE_QUERY.test(key)) url.searchParams.set(key, '<redacted>');
+    }
+    return /^https?:\/\//i.test(value) ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return '<invalid-url>';
+  }
+}
+
+export function redactHeaders(headers) {
   const out = {};
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase();
@@ -94,7 +106,10 @@ function truncate(text) {
   return { text: text.slice(0, MAX_CAPTURE_BYTES), truncated: true };
 }
 
-const server = http.createServer(async (req, res) => {
+export function createCaptureServer() {
+  fs.mkdirSync(OUT_DIR, { recursive: true, mode: 0o700 });
+  fs.chmodSync(OUT_DIR, 0o700);
+  return http.createServer(async (req, res) => {
   const recordPath = nextRecordPath();
   const started = Date.now();
   const chunks = [];
@@ -107,8 +122,8 @@ const server = http.createServer(async (req, res) => {
     startedAt: new Date().toISOString(),
     request: {
       method: req.method,
-      url: req.url,
-      upstream: target.toString(),
+      url: redactUrl(req.url || '/'),
+      upstream: redactUrl(target.toString()),
       headers: redactHeaders(req.headers),
       bodyBytes: requestBody.length,
       body: truncate(requestBody.toString('utf8')),
@@ -117,9 +132,10 @@ const server = http.createServer(async (req, res) => {
     error: null,
   };
 
-  console.log(`[capture] ${req.method} ${req.url} -> ${target.toString()} (${requestBody.length} bytes)`);
+  console.log(`[capture] ${req.method} ${redactUrl(req.url || '/')} -> ${redactUrl(target.toString())} (${requestBody.length} bytes)`);
 
-  const upstreamReq = https.request(
+  const transport = target.protocol === 'http:' ? http : https;
+  const upstreamReq = transport.request(
     target,
     {
       method: req.method,
@@ -146,7 +162,7 @@ const server = http.createServer(async (req, res) => {
         record.response.body = truncate(text);
         record.response.durationMs = Date.now() - started;
         res.end();
-        fs.writeFileSync(recordPath, JSON.stringify(record, null, 2));
+        fs.writeFileSync(recordPath, JSON.stringify(record, null, 2), { mode: 0o600 });
         console.log(
           `[capture] response ${record.response.status} ${size} bytes in ${record.response.durationMs}ms -> ${recordPath}`,
         );
@@ -154,7 +170,7 @@ const server = http.createServer(async (req, res) => {
       upstreamRes.on('error', (err) => {
         record.error = String(err);
         res.destroy(err);
-        fs.writeFileSync(recordPath, JSON.stringify(record, null, 2));
+        fs.writeFileSync(recordPath, JSON.stringify(record, null, 2), { mode: 0o600 });
         console.error(`[capture] upstream response error: ${err}`);
       });
     },
@@ -166,16 +182,20 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(502, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: String(err) } }));
     }
-    fs.writeFileSync(recordPath, JSON.stringify(record, null, 2));
+    fs.writeFileSync(recordPath, JSON.stringify(record, null, 2), { mode: 0o600 });
     console.error(`[capture] upstream request error: ${err}`);
   });
 
   upstreamReq.end(requestBody);
-});
+  });
+}
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[capture] listening on http://127.0.0.1:${PORT}`);
-  console.log(`[capture] upstream: ${UPSTREAM}`);
-  console.log(`[capture] chat upstream: ${CHAT_UPSTREAM}`);
-  console.log(`[capture] output:   ${OUT_DIR}`);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+  const server = createCaptureServer();
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`[capture] listening on http://127.0.0.1:${PORT}`);
+    console.log(`[capture] upstream: ${redactUrl(UPSTREAM)}`);
+    console.log(`[capture] chat upstream: ${redactUrl(CHAT_UPSTREAM)}`);
+    console.log(`[capture] output:   ${OUT_DIR}`);
+  });
+}

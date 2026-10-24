@@ -3,12 +3,14 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import { config } from './config.mjs';
 import { authStatus } from './auth.mjs';
+import { capabilities, validateRequest } from './validation.mjs';
+import { createResumeDetector } from './util/resume.mjs';
 import {
   listModels,
   resolveModel,
   toAnthropicModels,
   toCodexCatalog,
-  toOpenAiModel,
+  toOpenAiModels,
 } from './models.mjs';
 import { handleOpenAiChat } from './adapters/openai-chat.mjs';
 import { handleOpenAiResponses } from './adapters/openai-responses.mjs';
@@ -27,6 +29,19 @@ import { inc, addGauge, setGauge, renderPrometheus } from './util/metrics.mjs';
 import { info, error as logError } from './util/logger.mjs';
 import { getQueueState, subscribeQueue } from './util/state.mjs';
 import { safeEqual, isLoopbackHost } from './util/security.mjs';
+
+const activeControllers = new Set();
+const resumeDetector = createResumeDetector({
+  onResume(state) {
+    const activeRequests = activeControllers.size;
+    for (const controller of activeControllers) {
+      controller.abort(new Error('system resumed after a long pause; retry the request'));
+    }
+    server.closeIdleConnections?.();
+    inc('proxy_resume_events_total');
+    info('runtime.resumed', { ...state, activeRequests });
+  },
+});
 
 function requestIds(req) {
   const sessionId =
@@ -56,6 +71,7 @@ function estimateTokens(body) {
 }
 
 async function route(req, res) {
+  resumeDetector.check();
   writeCors(res);
   const requestId =
     typeof req.headers['x-request-id'] === 'string'
@@ -70,7 +86,20 @@ async function route(req, res) {
     return;
   }
 
-  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const url = new URL(req.url || '/', 'http://localhost');
+  const protocol = url.pathname === '/v1/messages' || url.pathname === '/v1/messages/count_tokens'
+    ? 'anthropic'
+    : 'openai';
+
+  if (url.pathname !== '/healthz' && !authorized(req)) {
+    sendError(res, 401, 'Invalid proxy API key', { type: 'authentication_error', protocol });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/v1/capabilities') {
+    sendJson(res, 200, capabilities);
+    return;
+  }
 
   if (req.method === 'GET' && url.pathname === '/metrics') {
     res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
@@ -108,7 +137,7 @@ async function route(req, res) {
     } catch (err) {
       modelError = err.message;
     }
-    sendJson(res, auth.ok ? 200 : 503, {
+    sendJson(res, auth.ok && !modelError ? 200 : 503, {
       ok: auth.ok && !modelError,
       auth,
       models: models.length,
@@ -116,6 +145,7 @@ async function route(req, res) {
       upstream: config.chatUrl,
       queue: getQueueState(),
       catalogSync: getCatalogSyncState(),
+      runtime: { activeRequests: activeControllers.size, lastResume: resumeDetector.status() },
     });
     return;
   }
@@ -151,13 +181,8 @@ async function route(req, res) {
     }
     sendJson(res, 200, {
       object: 'list',
-      data: models.map(toOpenAiModel),
+      data: toOpenAiModels(models),
     });
-    return;
-  }
-
-  if (!authorized(req)) {
-    sendError(res, 401, 'Invalid proxy API key', { type: 'authentication_error' });
     return;
   }
 
@@ -173,10 +198,6 @@ async function route(req, res) {
     return;
   }
 
-  const protocol = url.pathname === '/v1/messages' || url.pathname === '/v1/messages/count_tokens'
-    ? 'anthropic'
-    : 'openai';
-
   let body;
   try {
     body = await readJsonBody(req, config.maxBodyBytes);
@@ -186,12 +207,23 @@ async function route(req, res) {
   }
 
   if (url.pathname === '/v1/messages/count_tokens') {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      sendError(res, 400, 'Request body must be a JSON object', { protocol });
+      return;
+    }
     sendJson(res, 200, { input_tokens: estimateTokens(body) });
     return;
   }
 
   if (!['/v1/chat/completions', '/v1/responses', '/v1/messages'].includes(url.pathname)) {
     sendError(res, 404, 'Not found', { protocol });
+    return;
+  }
+
+  try {
+    validateRequest(body, url.pathname === '/v1/responses' ? 'responses' : protocol);
+  } catch (err) {
+    sendError(res, err.status || 400, err.message, { protocol });
     return;
   }
 
@@ -208,7 +240,9 @@ async function route(req, res) {
   }
 
   const ids = requestIds(req);
+  resumeDetector.check();
   const controller = new AbortController();
+  activeControllers.add(controller);
   const timeout = setTimeout(
     () => controller.abort(new Error('proxy request timeout')),
     config.requestTimeoutMs,
@@ -269,9 +303,10 @@ async function route(req, res) {
       message: err.message,
     });
     if (!res.headersSent) {
-      const status = err.status || 502;
+      const status = signal.aborted && !res.destroyed ? 504 : err.status || 502;
+      if (err.retryAfter) res.setHeader('retry-after', err.retryAfter);
       sendError(res, status, err.message, {
-        type: status === 401 ? 'authentication_error' : 'api_error',
+        type: status === 401 ? 'authentication_error' : status === 429 ? 'rate_limit_error' : 'api_error',
         code: err.code || null,
         protocol,
       });
@@ -279,6 +314,7 @@ async function route(req, res) {
       res.end();
     }
   } finally {
+    activeControllers.delete(controller);
     clearTimeout(timeout);
     res.off('close', onClientClose);
     addGauge('proxy_active_requests', {}, -1);
@@ -313,6 +349,8 @@ if (!isLoopbackHost(config.host) && !config.apiKey && !config.allowInsecureBind)
 }
 
 setGauge('proxy_active_requests', {}, 0);
+const resumeTimer = setInterval(() => resumeDetector.check(), 5000);
+resumeTimer.unref();
 
 async function refreshModels(reason) {
   try {
@@ -339,6 +377,8 @@ server.listen(config.port, config.host, () => {
 });
 
 function shutdown() {
+  clearInterval(resumeTimer);
+  for (const controller of activeControllers) controller.abort(new Error('proxy shutting down'));
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 3000).unref();
 }

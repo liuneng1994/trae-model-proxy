@@ -122,7 +122,12 @@ function variantsOf(model) {
 export function selectModelVariant(model, { maxMode = config.maxMode } = {}) {
   const variants = variantsOf(model);
   if (!maxMode || !variants.max_key) {
-    return { ...model, variant: 'standard' };
+    return {
+      ...model,
+      backendModel: variants.standard_key || model.backendModel,
+      contextWindow: variants.standard_context_window || model.contextWindow,
+      variant: 'standard',
+    };
   }
   return {
     ...model,
@@ -220,13 +225,16 @@ const CODEX_OPTIONAL_FIELDS = [
 
 export function toCodexCatalog(models) {
   return {
-    models: models.map((model) => {
-      const effective = selectModelVariant(model);
+    models: models.flatMap((model) => {
+      const variants = [selectModelVariant(model, { maxMode: false })];
+      const max = selectModelVariant(model, { maxMode: true });
+      if (max.variant === 'max') variants.push(max);
+      return variants.map((effective) => {
       const raw = model.raw || {};
       const contextWindow = effective.contextWindow || raw.context_window || 200000;
       const entry = {
-        slug: model.slug,
-        display_name: `TRAE · ${model.slug}`,
+        slug: proxyClaudeModelId(model, { maxMode: effective.variant === 'max' }),
+        display_name: `TRAE · ${model.slug} · ${effective.variant === 'max' ? 'Max' : 'Standard'}`,
         description: model.description || raw.description || '',
         default_reasoning_level: raw.default_reasoning_level || 'high',
         supported_reasoning_levels:
@@ -238,7 +246,7 @@ export function toCodexCatalog(models) {
                 { effort: 'high', description: 'Greater reasoning depth for complex problems' },
               ],
         context_window: contextWindow,
-        max_context_window: raw.max_context_window || contextWindow,
+        max_context_window: contextWindow,
         shell_type: raw.shell_type || 'shell_command',
         visibility: raw.visibility || 'list',
         supported_in_api: raw.supported_in_api !== false,
@@ -257,6 +265,7 @@ export function toCodexCatalog(models) {
         supports_reasoning_summaries: raw.supports_reasoning_summaries ?? true,
         default_reasoning_summary: raw.default_reasoning_summary || 'auto',
         include_skills_usage_instructions: raw.include_skills_usage_instructions ?? true,
+        experimental_supported_tools: raw.experimental_supported_tools || [],
       };
       if (raw.model_messages && typeof raw.model_messages === 'object') {
         entry.model_messages = raw.model_messages;
@@ -265,6 +274,7 @@ export function toCodexCatalog(models) {
         if (raw[key] !== undefined) entry[key] = raw[key];
       }
       return entry;
+      });
     }),
   };
 }
@@ -316,18 +326,10 @@ export function resolveModelFromList(models, modelId, { maxMode = config.maxMode
     });
   }
 
-  // Allow the backend model name to be passed directly.
-  const loose = models.find((model) => {
-    return (
-      model.backendModel.toLowerCase().includes(wanted) ||
-      model.configName.toLowerCase().includes(wanted)
-    );
-  });
-  if (loose) {
-    return selectModelVariant(loose, {
-      maxMode: explicitMax || (maxMode && !explicitStandard),
-    });
-  }
+  const backendMatch = wanted && models.find((model) =>
+    String(variantsOf(model).max_key || '').toLowerCase() === wanted,
+  );
+  if (backendMatch) return selectModelVariant(backendMatch, { maxMode: true });
 
   const wantedKey = normalizeModelKey(wanted);
   if (wantedKey) {
@@ -353,10 +355,18 @@ export async function resolveModel(modelId, options) {
   return resolveModelFromList(await listModels(), modelId, options);
 }
 
-export function toOpenAiModel(model) {
-  const effective = selectModelVariant(model);
+export function toOpenAiModels(models) {
+  return models.flatMap((model) => {
+    const standard = toOpenAiModel(model);
+    const max = toOpenAiModel(model, { maxMode: true });
+    return max.id === standard.id ? [standard] : [standard, max];
+  });
+}
+
+export function toOpenAiModel(model, { maxMode = false } = {}) {
+  const effective = selectModelVariant(model, { maxMode });
   return {
-    id: model.id,
+    id: `${model.id}${effective.variant === 'max' ? '-max' : ''}`,
     object: 'model',
     created: Math.floor(Date.now() / 1000),
     owned_by: 'trae',

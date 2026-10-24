@@ -22,7 +22,13 @@ function readAuthFile() {
     );
   }
 
-  if (cached && stat.mtimeMs === cachedMtimeMs) return cached;
+  if (cached && stat.mtimeMs === cachedMtimeMs) {
+    const expiresAtMs = cached.expiresAt ? Date.parse(cached.expiresAt) : null;
+    if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+      throw new AuthError('TRAE access token has expired. Run `traecli login` and retry.');
+    }
+    return cached;
+  }
 
   let raw;
   try {

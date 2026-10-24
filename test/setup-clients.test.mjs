@@ -88,7 +88,7 @@ test('Claude setup configures max mode and local auto-mode classification', () =
       })}\n`,
     );
 
-    const setup = spawnSync(process.execPath, [script, '--claude-only'], {
+    const setup = spawnSync(process.execPath, [script, '--claude-only', '--force'], {
       env,
       encoding: 'utf8',
     });
@@ -97,20 +97,19 @@ test('Claude setup configures max mode and local auto-mode classification', () =
     const settingsFile = path.join(claudeHome, 'settings.json');
     const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
     assert.equal(settings.env.CLAUDE_CODE_AUTO_MODE_SERVER, '0');
+    assert.equal(settings.env.CLAUDE_CODE_AUTO_MODE_MODEL, 'trae/DeepSeek-V4-Flash-max');
+    assert.equal(settings.env.CLAUDE_CODE_BG_CLASSIFIER_MODEL, 'trae/DeepSeek-V4-Flash-max');
     assert.equal(settings.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '800000');
     assert.equal(settings.env.ANTHROPIC_MODEL, 'trae/GPT-6.1-Sol-max');
     assert.equal(settings.env.CLAUDE_CODE_SUBAGENT_MODEL, 'trae/GPT-5.6-Sol-max');
     assert.equal(settings.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1');
     assert.equal(settings.env.ANTHROPIC_API_KEY, 'preserve-me');
     assert.equal(settings.model, 'trae/GPT-6.1-Sol-max');
-    assert.deepEqual(settings.permissions.allow, [
-      'Bash(git status)',
-      'mcp__codegraph__*',
-    ]);
+    assert.deepEqual(settings.permissions.allow, ['Bash(git status)']);
     const promptCommands = settings.hooks.UserPromptSubmit.flatMap((entry) =>
       entry.hooks.map((hook) => hook.command),
     );
-    assert.deepEqual(promptCommands, ['existing prompt hook', 'codegraph prompt-hook']);
+    assert.deepEqual(promptCommands, ['existing prompt hook']);
     assert.deepEqual(settings.enabledPlugins, {
       'existing@example': true,
       'aws-serverless@claude-plugins-official': true,
@@ -132,10 +131,14 @@ test('Claude setup configures max mode and local auto-mode classification', () =
     });
     assert.equal(repeatedSetup.status, 0, repeatedSetup.stderr);
     const repeated = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-    const codegraphHooks = repeated.hooks.UserPromptSubmit.flatMap((entry) =>
-      entry.hooks.filter((hook) => hook.command === 'codegraph prompt-hook'),
-    );
-    assert.equal(codegraphHooks.length, 1);
+    assert.deepEqual(repeated.hooks, settings.hooks);
+    assert.deepEqual(repeated.permissions, settings.permissions);
+
+    repeated.env.ANTHROPIC_MODEL = 'user-changed-model';
+    repeated.permissions.allow.push('Bash(git diff)');
+    repeated.enabledPlugins['user-added@example'] = true;
+    repeated.modelSettings['user-model'] = { effortLevel: 'low' };
+    fs.writeFileSync(settingsFile, `${JSON.stringify(repeated, null, 2)}\n`);
 
     const uninstall = spawnSync(
       process.execPath,
@@ -150,9 +153,13 @@ test('Claude setup configures max mode and local auto-mode classification', () =
     assert.equal(cleaned.env?.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
     assert.equal(cleaned.env?.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, undefined);
     assert.equal(cleaned.env?.ANTHROPIC_API_KEY, 'preserve-me');
+    assert.equal(cleaned.env?.ANTHROPIC_MODEL, 'user-changed-model');
     assert.equal(cleaned.model, undefined);
-    assert.ok(cleaned.permissions.allow.includes('mcp__codegraph__*'));
-    assert.equal(cleaned.effortLevel, 'xhigh');
+    assert.deepEqual(cleaned.permissions.allow, ['Bash(git status)', 'Bash(git diff)']);
+    assert.deepEqual(cleaned.hooks, settings.hooks);
+    assert.equal(cleaned.effortLevel, undefined);
+    assert.deepEqual(cleaned.enabledPlugins, { 'existing@example': true, 'user-added@example': true });
+    assert.deepEqual(cleaned.modelSettings, { 'user-model': { effortLevel: 'low' } });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -25,7 +25,7 @@ test('writes a Codex catalog and detects unchanged content', () => {
   assert.equal(first.changed, true);
   const content = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.equal(content.models.length, 1);
-  assert.equal(content.models[0].slug, 'Seed-2.1-Turbo');
+  assert.equal(content.models[0].slug, 'trae/Seed-2.1-Turbo');
 
   const second = writeCodexCatalog(models, file);
   assert.equal(second.changed, false);
