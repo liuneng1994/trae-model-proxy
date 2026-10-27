@@ -1,4 +1,5 @@
 import { config } from '../config.mjs';
+import { withCacheControl } from '../util/cache.mjs';
 import { streamChat, completeChat } from '../upstream/trae-client.mjs';
 import {
   applyStopSequences,
@@ -22,12 +23,12 @@ function responseContentBlocks(content) {
   for (const part of content) {
     if (!part) continue;
     if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') {
-      blocks.push(textBlock(part.text || ''));
+      blocks.push(withCacheControl(textBlock(part.text || ''), part));
     } else if (part.type === 'input_image') {
-      blocks.push({
+      blocks.push(withCacheControl({
         type: 'image_url',
         image_url: { url: part.image_url || part.url || '' },
-      });
+      }, part));
     }
   }
   return blocks.length ? blocks : [textBlock('')];
@@ -44,12 +45,12 @@ function functionCallOutputBlocks(output) {
         part &&
         (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text')
       ) {
-        blocks.push(textBlock(part.text || ''));
+        blocks.push(withCacheControl(textBlock(part.text || ''), part));
       } else if (part?.type === 'input_image') {
-        blocks.push({
+        blocks.push(withCacheControl({
           type: 'image_url',
           image_url: { url: part.image_url || part.url || '' },
-        });
+        }, part));
       } else if (part && typeof part === 'object') {
         blocks.push(textBlock(JSON.stringify(part)));
       } else if (part != null) {
@@ -133,16 +134,16 @@ export function toTraeRequest(body, model, ids = {}) {
   for (const tool of body.tools || []) {
     if (!tool) continue;
     if (tool.type === 'function') {
-      tools.push(toTraeTool(tool.name, tool.description, tool.parameters));
+      tools.push(withCacheControl(toTraeTool(tool.name, tool.description, tool.parameters), tool));
     } else if (tool.type === 'custom') {
       const format = tool.format ? `\nInput format: ${JSON.stringify(tool.format)}` : '';
-      tools.push(toTraeTool(tool.name, `${tool.description || ''}${format}\nReturn the complete freeform tool input in the input field.`,
-        { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] }));
+      tools.push(withCacheControl(toTraeTool(tool.name, `${tool.description || ''}${format}\nReturn the complete freeform tool input in the input field.`,
+        { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] }), tool));
     } else if (tool.type === 'namespace' && Array.isArray(tool.tools)) {
       for (const child of tool.tools) {
         if (!child || child.type !== 'function') continue;
         const name = `${tool.name}.${child.name}`;
-        tools.push(toTraeTool(name, child.description, child.parameters));
+        tools.push(withCacheControl(toTraeTool(name, child.description, child.parameters), child));
       }
     }
   }
@@ -168,6 +169,7 @@ export function toTraeRequest(body, model, ids = {}) {
     stopSequences: normalizeStopSequences(body.stop ?? body.stop_sequences),
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,
+    usageContext: ids.usageContext,
   };
 }
 

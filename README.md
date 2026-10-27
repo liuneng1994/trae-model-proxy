@@ -99,7 +99,7 @@ npm run setup
 - 默认使用模型目录中的 max variant，并把真实 max context 配置给 Claude Code
 - 默认推理强度 `xhigh`
 - Claude auto mode 使用客户端 classifier，不探测 TRAE 上游不支持的 server-side classifier
-- 所有 subagent、teammate 和 workflow agent 强制使用 `trae/GPT-5.6-Sol-max`
+- 默认 subagent、teammate 和 workflow agent 继承主会话模型；`/model` 切换后不再固定使用另一模型
 - 使用 fullscreen TUI、auto memory 和 700K auto-compact window
 - 启用 `aws-serverless`、`frontend-design` 两个已安装的官方插件
 - 修改前自动备份原配置
@@ -108,7 +108,7 @@ npm run setup
 
 ```bash
 npm run setup -- --model trae/GPT-5.4 --effort medium
-npm run setup -- --model trae/DeepSeek-V4.1-Flash --small-model trae/DeepSeek-V4-Flash
+npm run setup -- --model trae/DeepSeek-V4.1-Flash --small-model trae/DeepSeek-V4.1-Flash
 ```
 
 只配置其中一个：
@@ -141,7 +141,7 @@ npm run setup
 | 选项 | 说明 |
 | --- | --- |
 | `--model <id>` | 两个客户端使用的主模型 |
-| `--subagent-model <id>` | Claude subagent 模型，默认 `trae/GPT-5.6-Sol` |
+| `--subagent-model <id>` | 默认 `inherit`，继承主会话模型；只有显式指定 ID 时使用独立子模型 |
 | `--small-model <id>` | Claude Code 的 small/fast 模型 |
 | `--effort low\|medium\|high\|xhigh\|max` | 推理强度 |
 | `--no-max` | 使用标准 `__dev` variant，不切换到 `max_key` |
@@ -214,7 +214,7 @@ curl -N http://127.0.0.1:8787/v1/queue/stream
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 export ANTHROPIC_AUTH_TOKEN=local-proxy
 export ANTHROPIC_MODEL=trae/GPT-6.1-Sol-max
-export ANTHROPIC_SMALL_FAST_MODEL=trae/DeepSeek-V4-Flash-max
+export ANTHROPIC_SMALL_FAST_MODEL=trae/DeepSeek-V4.1-Flash-max
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS=800000
 ```
 
@@ -294,6 +294,44 @@ Anthropic usage 中的 `input_tokens` 只包含未缓存输入，已缓存部分
 `cache_read_input_tokens` / `cache_creation_input_tokens`；代理会从 TRAE 返回的总
 `prompt_tokens` 中扣除这两项，避免 Claude Code 重复计算上下文并提前 compact。
 
+## 缓存与 subagent 会话
+
+默认 subagent/workflow 使用 `inherit` 跟随主会话模型，辅助 classifier 默认使用
+DeepSeek-V4.1-Flash Max。代理保留客户端提供的合法 `cache_control`（`ephemeral`，可选
+`ttl: 5m/1h`），覆盖 system、普通 user/assistant 文本、图片、工具结果及工具定义；
+不会自动添加断点，也不能保证 TRAE 原生支持某个 TTL。
+
+工具参数和结构化输出 schema 使用稳定的对象键序列化；数组、消息和工具列表仍保持
+客户端原始顺序。这样不会因为等价 JSON 对象的属性插入顺序不同而改变工具 schema。
+
+会话标识优先使用 `x-session-id` / `x-claude-code-session-id`，conversation 优先使用
+`x-conversation-id` / `x-thread-id`；也支持 `metadata.session_id/conversation_id/thread_id/agent_id`。
+子 thread 标识优先于共享父 session。同一请求重试以及代理内搜索多轮复用这些 ID。
+没有可靠标识时每次请求生成独立 ID，不根据 prompt、user ID 或父任务 ID 猜测共享会话。
+本机 Claude Code 已观察到发送 `x-claude-code-session-id`。TRAE 缓存池字段未实证启用，
+因此代理不发送猜测的 `parent_session_id/use_prompt_cache_pool/prompt_cache_key`。
+
+缓存观测：
+
+- 日志 `upstream.usage`：每次上游用量、cache read/write 和读取比例。
+- 日志 `request.done.usage`：同一次客户端请求中所有上游轮次的总用量。
+- `/metrics`：`proxy_input_tokens_total`、`proxy_output_tokens_total`、
+  `proxy_cache_read_tokens_total`、`proxy_cache_write_tokens_total` 和
+  `proxy_usage_reports_total`，按 model/variant/protocol 区分。
+- token 级命中比例为 cache-read 总量 / input 总量，不等于请求命中率，也不代表跨模型
+  能共享缓存。没有上游 usage 时不伪造用量。日志不保存 prompt、工具内容或会话 ID。
+
+可用合成上下文测量真实缓存效果（需要 TRAE 登录，会消耗模型额度）：
+
+```bash
+npm run test:live-cache
+# 可选：CACHE_TEST_MODELS=trae/GPT-6.1-Sol-max npm run test:live-cache
+```
+
+测试比较带/不带断点、重复请求、新会话、等价 schema 和继承上下文；结果写入临时
+JSON 文件。它是小样本观测，不是严格随机 A/B 实验，耗时包括上游调度及生成，不能
+单凭耗时下降证明缓存优化。默认 `npm test` 不运行此测试。
+
 ## Claude auto mode
 
 TRAE 的 `llm_raw_chat` 不实现 Anthropic 的 `safeguards` / `safeguard_results`
@@ -303,7 +341,7 @@ TRAE 的 `llm_raw_chat` 不实现 Anthropic 的 `safeguards` / `safeguard_result
 工作并直接使用 Claude Code 客户端 classifier，同时避免每个新会话先进行一次必然失败的
 server-side classifier 探测和兼容性提示。客户端 classifier 仍会调用模型，因此 `npm run setup`
 同时设置 `CLAUDE_CODE_AUTO_MODE_MODEL` 和 `CLAUDE_CODE_BG_CLASSIFIER_MODEL` 指向本地
-small/fast 模型（默认 `trae/DeepSeek-V4-Flash-max`），避免验证请求占用主模型额度。
+small/fast 模型（默认 `trae/DeepSeek-V4.1-Flash-max`），避免验证请求占用主模型额度。
 
 `/auto-mode-setup` 和 Claude Code hooks 会使用结构化输出。代理会把客户端提供的
 JSON Schema 转成系统指令，由模型按 schema 输出 JSON；这是模拟实现，不是上游原生能力。

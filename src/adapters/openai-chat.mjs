@@ -1,4 +1,5 @@
 import { config } from '../config.mjs';
+import { withCacheControl } from '../util/cache.mjs';
 import { streamChat, completeChat } from '../upstream/trae-client.mjs';
 import {
   applyStopSequences,
@@ -22,14 +23,14 @@ function contentBlocks(content) {
   for (const part of content) {
     if (!part) continue;
     if (part.type === 'text' || part.type === 'input_text') {
-      blocks.push(textBlock(part.text || ''));
+      blocks.push(withCacheControl(textBlock(part.text || ''), part));
     } else if (part.type === 'image_url') {
-      blocks.push({
+      blocks.push(withCacheControl({
         type: 'image_url',
         image_url: {
           url: typeof part.image_url === 'string' ? part.image_url : part.image_url?.url,
         },
-      });
+      }, part));
     } else if (typeof part.text === 'string') {
       blocks.push(textBlock(part.text));
     }
@@ -91,7 +92,7 @@ export function toTraeRequest(body, model, ids = {}) {
 
   const tools = (body.tools || [])
     .filter((tool) => tool && tool.type === 'function' && tool.function)
-    .map((tool) => toTraeTool(tool.function.name, tool.function.description, tool.function.parameters));
+    .map((tool) => withCacheControl(toTraeTool(tool.function.name, tool.function.description, tool.function.parameters), tool));
 
   const instruction = toolChoiceInstruction(normalizeToolChoice(body.tool_choice));
   if (instruction) {
@@ -116,6 +117,7 @@ export function toTraeRequest(body, model, ids = {}) {
     stopSequences: normalizeStopSequences(body.stop ?? body.stop_sequences),
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,
+    usageContext: ids.usageContext,
   };
 }
 

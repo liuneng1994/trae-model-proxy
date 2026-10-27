@@ -59,7 +59,7 @@ test('OpenAI Chat converts tool calls, tool results, tools, and tool_choice', ()
   assert.equal(assistant.tool_calls[0].function_call.name, 'Read');
   const toolMessage = request.messages.find((message) => message.role === 'tool');
   assert.equal(toolMessage.name, 'Read');
-  assert.equal(request.tools[0].function.parameters, '{"type":"object","properties":{}}');
+  assert.deepEqual(JSON.parse(request.tools[0].function.parameters), { type: 'object', properties: {} });
   assert.equal(request.maxTokens, 123);
   assert.equal(request.reasoningEffort, 'low');
 });

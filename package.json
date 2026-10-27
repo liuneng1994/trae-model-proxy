@@ -25,6 +25,7 @@
     "capture": "node scripts/capture.mjs",
     "test": "node --test test/*.test.mjs",
     "test:clients": "RUN_CLIENT_SMOKE=1 node --test test/client-smoke.test.mjs",
-    "test:live-search": "RUN_TRAE_LIVE=1 node --test test/live-search.test.mjs"
+    "test:live-search": "RUN_TRAE_LIVE=1 node --test test/live-search.test.mjs",
+    "test:live-cache": "RUN_TRAE_CACHE_LIVE=1 node --test test/live-cache.test.mjs"
   }
 }

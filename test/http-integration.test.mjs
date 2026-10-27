@@ -13,6 +13,7 @@ let upstream;
 let baseUrl;
 let hits = 0;
 let mode = 'success';
+const upstreamBodies = [];
 const apiKey = 'synthetic-proxy-key';
 const model = 'trae/test';
 const authHeaders = { authorization: `Bearer ${apiKey}` };
@@ -67,7 +68,9 @@ await test('HTTP proxy end-to-end contracts with an isolated mock gateway', asyn
   ] }))});\n`, { mode: 0o700 });
   upstream = http.createServer(async (req, res) => {
     hits++;
-    for await (const chunk of req) void chunk;
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    upstreamBodies.push(JSON.parse(raw));
     if (mode === 'rate') { res.writeHead(429, { 'retry-after': '2' }); res.end('limit'); return; }
     if (mode === 'timeout') return;
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -111,6 +114,24 @@ await test('HTTP proxy end-to-end contracts with an isolated mock gateway', asyn
         assert.ok(wire.includes('OK'), endpoint);
         assert.ok(wire.includes(endpoint === '/v1/messages' ? 'event: message_stop' : endpoint === '/v1/responses' ? 'event: response.completed' : '[DONE]'), endpoint);
       }
+    });
+    await t.test('cache markers and explicit child identities survive HTTP conversion', async () => {
+      mode = 'success';
+      const body = { ...requestFor('/v1/messages'), metadata: { session_id: 'root-session', thread_id: 'child-a' },
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }] }],
+        tools: [{ name: 'Read', input_schema: { type: 'object', properties: {} }, cache_control: { type: 'ephemeral' } }] };
+      const before = upstreamBodies.length;
+      for (let i = 0; i < 2; i++) assert.equal((await post('/v1/messages', body)).status, 200);
+      const [first, second] = upstreamBodies.slice(before);
+      assert.equal(first.session_id, 'root-session');
+      assert.equal(first.conversation_id, 'child-a');
+      assert.equal(second.conversation_id, first.conversation_id);
+      assert.equal(first.messages[0].content[0].cache_control.type, 'ephemeral');
+      assert.equal(first.tools[0].cache_control.type, 'ephemeral');
+      await post('/v1/messages', { ...body, metadata: { session_id: 'root-session', thread_id: 'child-b' } });
+      assert.equal(upstreamBodies.at(-1).conversation_id, 'child-b');
+      const metrics = await (await fetch(baseUrl + '/metrics', { headers: authHeaders })).text();
+      assert.ok(metrics.includes('proxy_cache_read_tokens_total{model="test",protocol="anthropic",variant="standard"}'));
     });
     await t.test('emulates stop sequences for all three APIs', async () => {
       mode = 'success';

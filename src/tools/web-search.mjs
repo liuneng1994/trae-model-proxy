@@ -3,6 +3,7 @@ import { completeChat } from '../upstream/trae-client.mjs';
 import { searchTrae } from '../upstream/trae-search.mjs';
 import { textBlock, toTraeTool, ensureToolId, mapUsageToAnthropic, mapStopReasonToAnthropic, applyStopSequences } from '../adapters/common.mjs';
 import { startSSE, writeSSEEvent, endSSE } from '../util/http.mjs';
+import { ensureSessionIds } from '../util/session.mjs';
 
 const SUPPORTED_TYPES = new Set(['web_search_20250305']);
 const resultKey = crypto.randomBytes(32);
@@ -100,7 +101,7 @@ export async function handleWebSearchMessages(body, params, res, { signal } = {}
   const tool = body.tools.find(isWebSearchTool);
   const maxUses = tool.max_uses ?? 5;
   params = {
-    ...params, messages: [...params.messages],
+    ...params, ...ensureSessionIds(params), messages: [...params.messages],
     tools: params.tools.filter((entry) => entry.function.name !== tool.name),
   };
   params.tools.push(toTraeTool(tool.name,

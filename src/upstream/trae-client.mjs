@@ -5,6 +5,8 @@ import { parseSSE } from './sse.mjs';
 import { inc } from '../util/metrics.mjs';
 import { setQueueState } from '../util/state.mjs';
 import { parseQueueNotice } from '../util/queue.mjs';
+import { ensureSessionIds } from '../util/session.mjs';
+import { recordUsage } from '../util/usage.mjs';
 
 export class UpstreamError extends Error {
   constructor(message, { status = 502, code = null, retryable = false, retryAfter = null, cause } = {}) {
@@ -197,6 +199,7 @@ async function* streamChatOnce(params, { signal } = {}) {
     });
   }
 
+  let reportedUsage = null;
   try {
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -302,7 +305,9 @@ async function* streamChatOnce(params, { signal } = {}) {
       }
 
       if (event === 'token_usage') {
-        yield { type: 'usage', usage: mapUsage(payload) };
+        const usage = mapUsage(payload);
+        reportedUsage = usage;
+        yield { type: 'usage', usage };
         continue;
       }
 
@@ -328,10 +333,12 @@ async function* streamChatOnce(params, { signal } = {}) {
   } finally {
     clearTimeout(timeout);
     if (signal) signal.removeEventListener('abort', onAbort);
+    if (reportedUsage) recordUsage(params, reportedUsage);
   }
 }
 
 export async function* streamChat(params, { signal } = {}) {
+  params = { ...params, ...ensureSessionIds(params) };
   const attempts = Math.max(1, Number(process.env.TRAE_MAX_ATTEMPTS) || config.maxAttempts);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     let hasOutput = false;

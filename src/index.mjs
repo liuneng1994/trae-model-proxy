@@ -5,6 +5,7 @@ import { config } from './config.mjs';
 import { authStatus } from './auth.mjs';
 import { capabilities, validateRequest } from './validation.mjs';
 import { createResumeDetector } from './util/resume.mjs';
+import { requestSessionIds } from './util/session.mjs';
 import {
   listModels,
   resolveModel,
@@ -42,18 +43,6 @@ const resumeDetector = createResumeDetector({
     info('runtime.resumed', { ...state, activeRequests });
   },
 });
-
-function requestIds(req) {
-  const sessionId =
-    req.headers['x-session-id'] ||
-    req.headers['x-claude-code-session-id'] ||
-    req.headers['x-conversation-id'];
-  const conversationId = req.headers['x-conversation-id'] || sessionId;
-  return {
-    sessionId: typeof sessionId === 'string' ? sessionId : undefined,
-    conversationId: typeof conversationId === 'string' ? conversationId : undefined,
-  };
-}
 
 function authorized(req) {
   if (!config.apiKey) return true;
@@ -239,7 +228,19 @@ async function route(req, res) {
     return;
   }
 
-  const ids = requestIds(req);
+  const ids = requestSessionIds(req.headers, body);
+  const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reports: 0 };
+  ids.usageContext = {
+    requestId,
+    protocol: url.pathname === '/v1/responses' ? 'responses' : protocol,
+    onUsage(usage) {
+      usageTotals.input += usage.promptTokens;
+      usageTotals.output += usage.completionTokens;
+      usageTotals.cacheRead += usage.cacheReadTokens;
+      usageTotals.cacheWrite += usage.cacheCreationTokens;
+      usageTotals.reports++;
+    },
+  };
   resumeDetector.check();
   const controller = new AbortController();
   activeControllers.add(controller);
@@ -265,6 +266,7 @@ async function route(req, res) {
     backendModel: model.backendModel,
     contextWindow: model.contextWindow,
     stream: Boolean(body.stream),
+    identitySource: ids.source,
   });
   if (config.verbose) {
     const effort =
@@ -324,6 +326,7 @@ async function route(req, res) {
       path: url.pathname,
       status: res.statusCode,
       durationMs: Date.now() - started,
+      ...(usageTotals.reports ? { usage: usageTotals } : {}),
     });
   }
 }

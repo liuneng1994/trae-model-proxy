@@ -63,6 +63,8 @@ test('runs real backend contract and returns server-tool results before continui
   await fixture(async ({ modelBodies, searchHits }) => {
     const result = await handleAnthropicMessages({ ...body, tools: [{ ...tool, allowed_domains: ['example.com'] }] }, model);
     assert.equal(searchHits(), 1);
+    assert.equal(modelBodies[0].session_id, modelBodies[1].session_id);
+    assert.equal(modelBodies[0].conversation_id, modelBodies[1].conversation_id);
     assert.deepEqual(result.content.map((block) => block.type), ['server_tool_use', 'web_search_tool_result', 'text']);
     assert.equal(result.content[1].content.length, 1);
     assert.equal(result.content[2].text, 'Search answer');

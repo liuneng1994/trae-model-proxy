@@ -65,6 +65,7 @@ const CLAUDE_ENV_KEYS = [
   'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
   'CLAUDE_CODE_SUBAGENT_MODEL',
   'CLAUDE_CODE_SUBAGENT_MODEL_FORCE',
+  'CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL',
   'MAX_THINKING_TOKENS',
 ];
 
@@ -76,8 +77,8 @@ function envEnabled(value, fallback = true) {
 function parseArgs(argv) {
   const options = {
     model: process.env.TRAE_DEFAULT_MODEL || 'trae/GPT-6.1-Sol',
-    subagentModel: process.env.TRAE_SUBAGENT_MODEL || 'trae/GPT-5.6-Sol',
-    smallModel: process.env.TRAE_SMALL_MODEL || 'trae/DeepSeek-V4-Flash',
+    subagentModel: process.env.TRAE_SUBAGENT_MODEL || 'inherit',
+    smallModel: process.env.TRAE_SMALL_MODEL || 'trae/DeepSeek-V4.1-Flash',
     effort: process.env.TRAE_DEFAULT_REASONING_EFFORT || 'xhigh',
     maxMode: envEnabled(process.env.TRAE_MAX_MODE, true),
     contextWindow: Number(process.env.TRAE_CLAUDE_CONTEXT_WINDOW) || null,
@@ -164,8 +165,8 @@ function printHelp() {
 
 Options:
   --model <id>          Main model for both clients (default: trae/GPT-6.1-Sol)
-  --subagent-model <id> Claude subagent model (default: trae/GPT-5.6-Sol)
-  --small-model <id>    Claude Code small/fast model (default: trae/DeepSeek-V4-Flash)
+  --subagent-model <id> Claude subagent model (default: inherit the main model)
+  --small-model <id>    Claude Code small/fast model (default: trae/DeepSeek-V4.1-Flash)
   --effort <level>      low | medium | high | xhigh | max (default: xhigh)
   --no-max              Use standard TRAE model variants instead of max
   --context-window <n>  Override Claude Code context window detection
@@ -548,9 +549,9 @@ function claudeModelFor(model, { maxMode = false } = {}) {
 
 function claudeEnv(options, contextWindow) {
   const mainModel = claudeModelFor(options.model, { maxMode: options.maxMode });
-  const subagentModel = claudeModelFor(options.subagentModel, {
-    maxMode: options.maxMode,
-  });
+  const subagentModel = options.subagentModel === 'inherit'
+    ? 'inherit'
+    : claudeModelFor(options.subagentModel, { maxMode: options.maxMode });
   const smallModel = claudeModelFor(options.smallModel, { maxMode: options.maxMode });
   return {
     ANTHROPIC_BASE_URL: options.baseUrl,
@@ -577,6 +578,7 @@ function claudeEnv(options, contextWindow) {
       : {}),
     CLAUDE_CODE_SUBAGENT_MODEL: subagentModel,
     CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
+    CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL: subagentModel,
     MAX_THINKING_TOKENS: effortBudget(options.effort),
   };
 }

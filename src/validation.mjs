@@ -35,6 +35,7 @@ export function validateRequest(body, protocol) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     reject('Request body must be a JSON object');
   }
+  validateCacheControls(body);
   if (body.model !== undefined && (typeof body.model !== 'string' || !body.model.trim())) {
     reject('model must be a non-empty string');
   }
@@ -135,6 +136,41 @@ export function validateRequest(body, protocol) {
     }
   }
   if (body.output_config?.format) validateStructuredFormat(body.output_config.format, 'output_config.format');
+}
+
+function validateCacheControls(body) {
+  const check = (source) => {
+    if (!source || !Object.hasOwn(source, 'cache_control')) return;
+    const control = source.cache_control;
+    if (!control || typeof control !== 'object' || Array.isArray(control) ||
+        control.type !== 'ephemeral' || (control.ttl !== undefined && !['5m', '1h'].includes(control.ttl))) {
+      reject('cache_control must be ephemeral with optional ttl 5m or 1h');
+    }
+  };
+  const blocks = (content) => {
+    if (!Array.isArray(content)) return;
+    for (const part of content) {
+      check(part);
+      if (part?.type === 'tool_result') blocks(part.content);
+    }
+  };
+  check(body);
+  blocks(body.system);
+  for (const message of Array.isArray(body.messages) ? body.messages : []) {
+    check(message);
+    blocks(message?.content);
+  }
+  for (const item of Array.isArray(body.input) ? body.input : []) {
+    check(item);
+    blocks(item?.content);
+    blocks(item?.output);
+  }
+  for (const tool of Array.isArray(body.tools) ? body.tools : []) {
+    check(tool);
+    if (tool?.type === 'namespace') {
+      for (const child of Array.isArray(tool.tools) ? tool.tools : []) check(child);
+    }
+  }
 }
 
 function validateStructuredFormat(format, label) {

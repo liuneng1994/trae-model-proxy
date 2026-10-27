@@ -16,6 +16,21 @@ test('install validates port and unsafe bind', () => {
   }
 });
 
+test('installer defaults subagents to main inheritance and preserves explicit overrides', () => {
+  const previous = process.env.TRAE_SUBAGENT_MODEL;
+  delete process.env.TRAE_SUBAGENT_MODEL;
+  try {
+    assert.equal(parseArgs(['--model', 'trae/GPT-5.6-Sol']).subagentModel, 'inherit');
+    assert.equal(parseArgs([]).smallModel, 'trae/DeepSeek-V4.1-Flash');
+    assert.equal(parseArgs(['--subagent-model', 'trae/Seed-2.1-Turbo']).subagentModel, 'trae/Seed-2.1-Turbo');
+    process.env.TRAE_SUBAGENT_MODEL = 'trae/Seed-2.1-Turbo';
+    assert.equal(parseArgs([]).subagentModel, 'trae/Seed-2.1-Turbo');
+  } finally {
+    if (previous === undefined) delete process.env.TRAE_SUBAGENT_MODEL;
+    else process.env.TRAE_SUBAGENT_MODEL = previous;
+  }
+});
+
 test('health gate requires both health.ok and auth.ok', async () => {
   const replies = [
     { ok: true, status: 200, json: async () => ({ ok: true, auth: { ok: false } }) },

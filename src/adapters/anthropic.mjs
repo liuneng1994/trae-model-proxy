@@ -1,4 +1,5 @@
 import { config } from '../config.mjs';
+import { withCacheControl } from '../util/cache.mjs';
 import { isWebSearchTool, handleWebSearchMessages, replaySearchResults } from '../tools/web-search.mjs';
 import { streamChat, completeChat } from '../upstream/trae-client.mjs';
 import {
@@ -39,14 +40,11 @@ function anthropicContentBlocks(content) {
   for (const part of content) {
     if (!part) continue;
     if (part.type === 'text') {
-      const block = textBlock(part.text || '');
-      if (part.cache_control) block.cache_control = part.cache_control;
-      blocks.push(block);
+      blocks.push(withCacheControl(textBlock(part.text || ''), part));
     } else if (part.type === 'image') {
       const image = imageBlock(part.source);
       if (image) {
-        if (part.cache_control) image.cache_control = part.cache_control;
-        blocks.push(image);
+        blocks.push(withCacheControl(image, part));
       }
     }
   }
@@ -60,18 +58,16 @@ function anthropicToolResultBlocks(content) {
   for (const part of content) {
     if (!part) continue;
     if (part.type === 'text') {
-      const block = textBlock(part.text || '');
-      if (part.cache_control) block.cache_control = part.cache_control;
-      blocks.push(block);
+      blocks.push(withCacheControl(textBlock(part.text || ''), part));
     } else if (part.type === 'image') {
       const image = imageBlock(part.source);
-      if (image) blocks.push(image);
+      if (image) blocks.push(withCacheControl(image, part));
     } else if (part.type === 'tool_reference' && part.tool_name) {
       // ToolSearch returns structured references rather than text. TRAE's raw
       // chat protocol has no equivalent block type, so preserve the result as
       // non-empty text; otherwise the upstream rejects the call as missing its
       // tool output.
-      blocks.push(textBlock(`Tool loaded: ${part.tool_name}`));
+      blocks.push(withCacheControl(textBlock(`Tool loaded: ${part.tool_name}`), part));
     } else if (typeof part.text === 'string') {
       blocks.push(textBlock(part.text));
     } else if (typeof part === 'object') {
@@ -113,7 +109,7 @@ export function toTraeRequest(body, model, ids = {}) {
         for (const part of content) {
           if (!part) continue;
           if (part.type === 'text') {
-            blocks.push(textBlock(part.text || ''));
+            blocks.push(withCacheControl(textBlock(part.text || ''), part));
           } else if (part.type === 'web_search_tool_result') {
             blocks.push(textBlock(`Web search results: ${replaySearchResults(part.content)}`));
           } else if (part.type === 'tool_use') {
@@ -153,17 +149,17 @@ export function toTraeRequest(body, model, ids = {}) {
     for (const part of content) {
       if (!part) continue;
       if (part.type === 'text') {
-        textBlocks.push(textBlock(part.text || ''));
+        textBlocks.push(withCacheControl(textBlock(part.text || ''), part));
       } else if (part.type === 'image') {
         const image = imageBlock(part.source);
-        if (image) textBlocks.push(image);
+        if (image) textBlocks.push(withCacheControl(image, part));
       } else if (part.type === 'tool_result') {
         if (textBlocks.length) {
           messages.push({ role: 'user', content: textBlocks.splice(0) });
         }
         const toolContent = anthropicToolResultBlocks(part.content);
         if (part.cache_control && toolContent.length) {
-          toolContent[toolContent.length - 1].cache_control = part.cache_control;
+          toolContent[toolContent.length - 1] = withCacheControl(toolContent[toolContent.length - 1], part);
         }
         messages.push({
           role: 'tool',
@@ -180,7 +176,7 @@ export function toTraeRequest(body, model, ids = {}) {
 
   const tools = (body.tools || [])
     .filter((tool) => tool && !isWebSearchTool(tool))
-    .map((tool) => toTraeTool(tool.name, tool.description, tool.input_schema));
+    .map((tool) => withCacheControl(toTraeTool(tool.name, tool.description, tool.input_schema), tool));
 
   const instruction = toolChoiceInstruction(normalizeToolChoice(body.tool_choice));
   if (instruction) {
@@ -211,6 +207,7 @@ export function toTraeRequest(body, model, ids = {}) {
     stopSequences: normalizeStopSequences(body.stop_sequences ?? body.stop),
     sessionId: ids.sessionId,
     conversationId: ids.conversationId,
+    usageContext: ids.usageContext,
   };
 }
 

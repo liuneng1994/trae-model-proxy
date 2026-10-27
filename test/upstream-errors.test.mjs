@@ -45,6 +45,41 @@ test('empty EOF can retry, but persistent EOF is never successful', async () => 
   });
 });
 
+test('retries reuse request identity while independent calls remain isolated', async () => {
+  const bodies = [];
+  await withUpstream(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    bodies.push(JSON.parse(raw));
+    if (bodies.length === 1) { res.writeHead(429, { 'retry-after': '0' }); res.end(); return; }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(output + done);
+  }, async () => {
+    await completeChat(params);
+    assert.equal(bodies[0].session_id, bodies[1].session_id);
+    assert.equal(bodies[0].conversation_id, bodies[1].conversation_id);
+    await completeChat(params);
+    assert.notEqual(bodies[2].session_id, bodies[0].session_id);
+    assert.notEqual(bodies[2].conversation_id, bodies[0].conversation_id);
+    assert.equal(Object.hasOwn(bodies[0], 'use_prompt_cache_pool'), false);
+    assert.equal(Object.hasOwn(bodies[0], 'parent_session_id'), false);
+  });
+});
+
+test('repeated usage frames are counted once using the final snapshot', async () => {
+  await withUpstream((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end('event: token_usage\ndata: {"prompt_tokens":100,"completion_tokens":1}\n\n' +
+      'event: token_usage\ndata: {"prompt_tokens":100,"completion_tokens":10,"cache_read_input_tokens":80}\n\n' + done);
+  }, async () => {
+    const reported = [];
+    await completeChat({ ...params, usageContext: { onUsage: (usage) => reported.push(usage) } });
+    assert.equal(reported.length, 1);
+    assert.equal(reported[0].completionTokens, 10);
+    assert.equal(reported[0].cacheReadTokens, 80);
+  });
+});
+
 test('rate limits preserve HTTP status and Retry-After', async () => {
   await withUpstream((req, res) => {
     res.writeHead(429, { 'retry-after': '0' });

@@ -18,9 +18,10 @@ test('Claude setup configures max mode and local auto-mode classification', () =
     TRAECLI_BIN: fakeTraeCli,
     TRAE_PROXY_BASE_URL: 'http://127.0.0.1:8787',
     TRAE_DEFAULT_MODEL: 'trae/GPT-6.1-Sol',
-    TRAE_SUBAGENT_MODEL: 'trae/GPT-5.6-Sol',
     TRAE_DEFAULT_REASONING_EFFORT: 'xhigh',
   };
+  delete env.TRAE_SUBAGENT_MODEL;
+  delete env.TRAE_SMALL_MODEL;
 
   try {
     const variants = (standard, standardWindow, max, maxWindow) => ({
@@ -52,16 +53,16 @@ test('Claude setup configures max mode and local auto-mode classification', () =
           },
         },
         {
-          name: 'DeepSeek-V4-Flash',
-          config_name: 'DeepSeek-V4-Flash',
-          backend_model: 'DeepSeek-V4-Flash__dev',
+          name: 'DeepSeek-V4.1-Flash',
+          config_name: 'DeepSeek-V4.1-Flash',
+          backend_model: 'DeepSeek-V4.1-Flash__dev',
           context_window: 216000,
           max_context_window: 1000000,
           business_metadata: {
             variants: variants(
-              'DeepSeek-V4-Flash__dev',
+              'DeepSeek-V4.1-Flash__dev',
               216000,
-              'DeepSeek-V4-Flash__max',
+              'DeepSeek-V4.1-Flash__max',
               1000000,
             ),
           },
@@ -97,12 +98,15 @@ test('Claude setup configures max mode and local auto-mode classification', () =
     const settingsFile = path.join(claudeHome, 'settings.json');
     const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
     assert.equal(settings.env.CLAUDE_CODE_AUTO_MODE_SERVER, '0');
-    assert.equal(settings.env.CLAUDE_CODE_AUTO_MODE_MODEL, 'trae/DeepSeek-V4-Flash-max');
-    assert.equal(settings.env.CLAUDE_CODE_BG_CLASSIFIER_MODEL, 'trae/DeepSeek-V4-Flash-max');
+    assert.equal(settings.env.ANTHROPIC_SMALL_FAST_MODEL, 'trae/DeepSeek-V4.1-Flash-max');
+    assert.equal(settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'trae/DeepSeek-V4.1-Flash-max');
+    assert.equal(settings.env.CLAUDE_CODE_AUTO_MODE_MODEL, 'trae/DeepSeek-V4.1-Flash-max');
+    assert.equal(settings.env.CLAUDE_CODE_BG_CLASSIFIER_MODEL, 'trae/DeepSeek-V4.1-Flash-max');
     assert.equal(settings.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '800000');
     assert.equal(settings.env.ANTHROPIC_MODEL, 'trae/GPT-6.1-Sol-max');
-    assert.equal(settings.env.CLAUDE_CODE_SUBAGENT_MODEL, 'trae/GPT-5.6-Sol-max');
+    assert.equal(settings.env.CLAUDE_CODE_SUBAGENT_MODEL, 'inherit');
     assert.equal(settings.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1');
+    assert.equal(settings.env.CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL, 'inherit');
     assert.equal(settings.env.ANTHROPIC_API_KEY, 'preserve-me');
     assert.equal(settings.model, 'trae/GPT-6.1-Sol-max');
     assert.deepEqual(settings.permissions.allow, ['Bash(git status)']);
@@ -124,6 +128,26 @@ test('Claude setup configures max mode and local auto-mode classification', () =
     assert.equal(settings.autoMemoryEnabled, true);
     assert.equal(settings.skipDangerousModePermissionPrompt, true);
     assert.equal(settings.theme, 'auto');
+
+    const setupAgain = (args, extraEnv = {}) => {
+      const result = spawnSync(process.execPath, [script, '--claude-only', ...args], {
+        env: { ...env, ...extraEnv }, encoding: 'utf8',
+      });
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    };
+    const changedMain = setupAgain(['--model', 'trae/GPT-5.6-Sol', '--no-max']);
+    assert.equal(changedMain.env.ANTHROPIC_MODEL, 'trae/GPT-5.6-Sol');
+    assert.equal(changedMain.env.CLAUDE_CODE_SUBAGENT_MODEL, 'inherit');
+    assert.equal(changedMain.env.CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL, 'inherit');
+    const explicit = setupAgain(['--subagent-model', 'trae/GPT-5.6-Sol']);
+    assert.equal(explicit.env.CLAUDE_CODE_SUBAGENT_MODEL, 'trae/GPT-5.6-Sol-max');
+    assert.equal(explicit.env.CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL, 'trae/GPT-5.6-Sol-max');
+    const fromEnv = setupAgain([], { TRAE_SUBAGENT_MODEL: 'trae/GPT-5.6-Sol' });
+    assert.equal(fromEnv.env.CLAUDE_CODE_SUBAGENT_MODEL, 'trae/GPT-5.6-Sol-max');
+    const restoredDefault = setupAgain([]);
+    assert.equal(restoredDefault.env.CLAUDE_CODE_SUBAGENT_MODEL, 'inherit');
+    assert.equal(restoredDefault.env.CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL, 'inherit');
 
     const repeatedSetup = spawnSync(process.execPath, [script, '--claude-only'], {
       env,
@@ -152,6 +176,7 @@ test('Claude setup configures max mode and local auto-mode classification', () =
     assert.equal(cleaned.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
     assert.equal(cleaned.env?.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
     assert.equal(cleaned.env?.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, undefined);
+    assert.equal(cleaned.env?.CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL, undefined);
     assert.equal(cleaned.env?.ANTHROPIC_API_KEY, 'preserve-me');
     assert.equal(cleaned.env?.ANTHROPIC_MODEL, 'user-changed-model');
     assert.equal(cleaned.model, undefined);

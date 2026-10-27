@@ -1,4 +1,5 @@
 import { config } from '../config.mjs';
+import { stableStringify } from '../util/cache.mjs';
 
 export function textBlock(text) {
   return { type: 'text', text: String(text ?? '') };
@@ -24,7 +25,7 @@ export function toTraeTool(name, description, parameters) {
       parameters:
         typeof parameters === 'string'
           ? parameters
-          : JSON.stringify(parameters || { type: 'object', properties: {} }),
+          : stableStringify(parameters || { type: 'object', properties: {} }),
     },
   };
 }
@@ -142,7 +143,7 @@ export function structuredOutputInstruction(format) {
   return [
     'Return a single JSON value that conforms to the following JSON Schema.',
     'Output only the JSON value, with no markdown fences or surrounding text.',
-    `JSON Schema: ${JSON.stringify(parsed.schema ?? {})}`,
+    `JSON Schema: ${stableStringify(parsed.schema ?? {})}`,
   ].join('\n');
 }
 

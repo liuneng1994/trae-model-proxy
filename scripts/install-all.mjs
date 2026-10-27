@@ -12,7 +12,7 @@ const ROOT = path.resolve(here, '..');
 const HOME = os.homedir();
 
 export function parseArgs(argv) {
-  const options = { model: 'trae/GPT-6.1-Sol', subagentModel: 'trae/GPT-5.6-Sol', smallModel: 'trae/DeepSeek-V4-Flash', effort: 'xhigh', host: '127.0.0.1', port: 8787, noService: false, noClients: false, replace: false, installCli: true, dryRun: false };
+  const options = { model: 'trae/GPT-6.1-Sol', subagentModel: process.env.TRAE_SUBAGENT_MODEL || 'inherit', smallModel: 'trae/DeepSeek-V4.1-Flash', effort: 'xhigh', host: '127.0.0.1', port: 8787, noService: false, noClients: false, replace: false, installCli: true, dryRun: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = () => { if (++i >= argv.length) throw new Error(`Missing value for ${arg}`); return argv[i]; };
