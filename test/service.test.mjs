@@ -17,5 +17,5 @@ test('service generators persist runtime env and escape platform formats', () =>
 
   const unit = generateSystemdUnit(context);
   assert.match(unit, /Environment="PROXY_API_KEY=secret \\"value\\" %%"/);
-  assert.match(unit, /WorkingDirectory="\/tmp\/project %% name"/);
+  assert.match(unit, /WorkingDirectory=\/tmp\/project\\x20%%\\x20name/);
 });

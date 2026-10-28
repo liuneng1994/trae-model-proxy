@@ -50,6 +50,20 @@ function systemdQuote(value, { command = false } = {}) {
   return `"${text}"`;
 }
 
+function systemdPath(value) {
+  const text = String(value);
+  if (/[\x00-\x1f\x7f]/.test(text)) throw new Error('Service paths cannot contain control characters or NUL');
+  if (!path.isAbsolute(text)) throw new Error(`Service path must be absolute: ${text}`);
+  let escaped = '';
+  for (const byte of Buffer.from(text)) {
+    const char = String.fromCharCode(byte);
+    if (byte === 0x25) escaped += '%%';
+    else if (/[A-Za-z0-9_./:-]/.test(char)) escaped += char;
+    else escaped += `\\x${byte.toString(16).padStart(2, '0')}`;
+  }
+  return escaped;
+}
+
 export function generateLaunchAgent(context = serviceContext()) {
   const logs = path.join(context.home, 'Library', 'Logs');
   const envXml = Object.entries(context.env)
@@ -81,7 +95,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${systemdQuote(context.projectRoot)}
+WorkingDirectory=${systemdPath(context.projectRoot)}
 ExecStart=${systemdQuote(context.node, { command: true })} ${systemdQuote(path.join(context.projectRoot, 'src', 'index.mjs'), { command: true })}
 Restart=on-failure
 RestartSec=5

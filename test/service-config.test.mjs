@@ -19,7 +19,7 @@ test('launchd preserves runtime settings and XML-escapes secret values', () => {
 test('systemd quotes paths and environment while escaping command expansion', () => {
   const unit = generateSystemdUnit(context);
   assert.ok(unit.includes('Environment="HOME=/home/test user"'));
-  assert.ok(unit.includes('WorkingDirectory="/home/test user/project$cash%%value"'));
+  assert.ok(unit.includes('WorkingDirectory=/home/test\\x20user/project\\x24cash%%value'));
   assert.ok(unit.includes('ExecStart="/bin/node" "/home/test user/project$$cash%%value/src/index.mjs"'));
 });
 
