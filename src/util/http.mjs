@@ -53,6 +53,14 @@ export function endSSE(res) {
   if (!res.writableEnded) res.end();
 }
 
+export function setQueueHeaders(res, queue) {
+  if (!queue || res.headersSent) return;
+  if (queue.phase) res.setHeader('x-trae-queue-phase', String(queue.phase));
+  if (queue.position !== null && queue.position !== undefined) {
+    res.setHeader('x-trae-queue-position', String(queue.position));
+  }
+}
+
 export async function readJsonBody(req, maxBytes) {
   const chunks = [];
   let size = 0;

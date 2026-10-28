@@ -17,7 +17,7 @@ import {
   toTraeTool,
   toolChoiceInstruction,
 } from './common.mjs';
-import { endSSE, startSSE, writeSSEEvent } from '../util/http.mjs';
+import { endSSE, setQueueHeaders, startSSE, writeSSEEvent } from '../util/http.mjs';
 
 function imageBlock(source) {
   if (!source) return null;
@@ -240,15 +240,16 @@ function toAnthropicContent(result) {
   return content;
 }
 
-export async function handleAnthropicMessages(body, model, res, { signal, ids } = {}) {
+export async function handleAnthropicMessages(body, model, res, { signal, ids, activity } = {}) {
   const params = toTraeRequest(body, model, ids);
   if (body.tool_choice?.type !== 'none' && body.tools?.some(isWebSearchTool)) {
-    return handleWebSearchMessages(body, params, res, { signal });
+    return handleWebSearchMessages(body, params, res, { signal, activity });
   }
   const id = `msg_${Date.now().toString(36)}`;
 
   if (!body.stream) {
-    const result = await completeChat(params, { signal });
+    const result = await completeChat(params, { signal, activity });
+    setQueueHeaders(res, result.queue);
     const filtered = applyStopSequences(result.text, params.stopSequences);
     const hasToolCalls = result.toolCalls.length > 0;
     const stopped = filtered.stopped && !hasToolCalls;
@@ -340,10 +341,15 @@ export async function handleAnthropicMessages(body, model, res, { signal, ids } 
   };
 
   try {
-    for await (const event of streamChat(params, { signal })) {
+    for await (const event of streamChat(params, { signal, activity })) {
       switch (event.type) {
         case 'queue':
-          send('ping', { type: 'ping', queue: event.message });
+          send('ping', {
+            type: 'ping',
+            queue: event.message,
+            queue_phase: event.phase,
+            queue_position: event.position ?? null,
+          });
           break;
         case 'reasoning':
           // Internal reasoning is intentionally not emitted as Anthropic thinking:

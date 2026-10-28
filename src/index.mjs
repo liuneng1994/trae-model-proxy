@@ -29,7 +29,10 @@ import { getCatalogSyncState, syncCodexCatalog } from './catalog.mjs';
 import { inc, addGauge, setGauge, renderPrometheus } from './util/metrics.mjs';
 import { info, error as logError } from './util/logger.mjs';
 import { getQueueState, subscribeQueue } from './util/state.mjs';
+import { createUpdateService } from './update.mjs';
 import { safeEqual, isLoopbackHost } from './util/security.mjs';
+
+const updateService = createUpdateService();
 
 const activeControllers = new Set();
 const resumeDetector = createResumeDetector({
@@ -96,6 +99,17 @@ async function route(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/v1/update') {
+    sendJson(res, 200, updateService.getState());
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/update/check') {
+    const state = await updateService.check();
+    sendJson(res, 200, state);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/queue') {
     sendJson(res, 200, { queue: getQueueState() });
     return;
@@ -133,6 +147,7 @@ async function route(req, res) {
       modelError,
       upstream: config.chatUrl,
       queue: getQueueState(),
+      update: updateService.getState(),
       catalogSync: getCatalogSyncState(),
       runtime: { activeRequests: activeControllers.size, lastResume: resumeDetector.status() },
     });
@@ -244,10 +259,24 @@ async function route(req, res) {
   resumeDetector.check();
   const controller = new AbortController();
   activeControllers.add(controller);
-  const timeout = setTimeout(
-    () => controller.abort(new Error('proxy request timeout')),
-    config.requestTimeoutMs,
-  );
+  // Queue waiting is unbounded: the request deadline only starts once the
+  // upstream has sent response headers. This keeps queued requests alive
+  // without adding or raising any timeout configuration.
+  const activity = { upstreamStartedAt: null };
+  let timeout = null;
+  const armTimeout = () => {
+    if (!activity.upstreamStartedAt) {
+      timeout = setTimeout(armTimeout, 1000);
+      return;
+    }
+    const remaining = config.requestTimeoutMs - (Date.now() - activity.upstreamStartedAt);
+    if (remaining <= 0) {
+      controller.abort(new Error('proxy request timeout'));
+      return;
+    }
+    timeout = setTimeout(armTimeout, remaining);
+  };
+  timeout = setTimeout(armTimeout, 1000);
   const onClientClose = () => {
     if (!res.writableEnded) controller.abort(new Error('client disconnected'));
   };
@@ -284,13 +313,13 @@ async function route(req, res) {
 
   try {
     if (url.pathname === '/v1/chat/completions') {
-      const payload = await handleOpenAiChat(body, model, res, { signal, ids });
+      const payload = await handleOpenAiChat(body, model, res, { signal, ids, activity });
       if (!body.stream) sendJson(res, 200, payload);
     } else if (url.pathname === '/v1/responses') {
-      const payload = await handleOpenAiResponses(body, model, res, { signal, ids });
+      const payload = await handleOpenAiResponses(body, model, res, { signal, ids, activity });
       if (!body.stream) sendJson(res, 200, payload);
     } else {
-      const payload = await handleAnthropicMessages(body, model, res, { signal, ids });
+      const payload = await handleAnthropicMessages(body, model, res, { signal, ids, activity });
       if (!body.stream) sendJson(res, 200, payload);
     }
   } catch (err) {
@@ -369,6 +398,8 @@ if (config.modelRefreshMs > 0) {
   setInterval(() => refreshModels('interval'), config.modelRefreshMs).unref?.();
 }
 
+updateService.start();
+
 server.listen(config.port, config.host, () => {
   info('startup.listening', {
     url: `http://${config.host}:${config.port}`,
@@ -381,6 +412,7 @@ server.listen(config.port, config.host, () => {
 
 function shutdown() {
   clearInterval(resumeTimer);
+  updateService.stop();
   for (const controller of activeControllers) controller.abort(new Error('proxy shutting down'));
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 3000).unref();

@@ -14,7 +14,7 @@ import {
   toTraeTool,
   toolChoiceInstruction,
 } from './common.mjs';
-import { endSSE, startSSE, writeSSEEvent } from '../util/http.mjs';
+import { endSSE, setQueueHeaders, startSSE, writeSSEEvent } from '../util/http.mjs';
 
 function responseContentBlocks(content) {
   if (typeof content === 'string') return [textBlock(content)];
@@ -235,7 +235,7 @@ function responseObject({
   };
 }
 
-export async function handleOpenAiResponses(body, model, res, { signal, ids } = {}) {
+export async function handleOpenAiResponses(body, model, res, { signal, ids, activity } = {}) {
   const params = toTraeRequest(body, model, ids);
   const customNames = new Set((body.tools || []).filter((tool) => tool.type === 'custom').map((tool) => tool.name));
   const toolItem = (id, callId, name, args, status = 'completed') => {
@@ -256,7 +256,8 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   const responseId = `resp_${Date.now().toString(36)}`;
 
   if (!body.stream) {
-    const result = await completeChat(params, { signal });
+    const result = await completeChat(params, { signal, activity });
+    setQueueHeaders(res, result.queue);
     const filtered = applyStopSequences(result.text, params.stopSequences);
     const output = [];
     if (result.reasoning) {
@@ -452,7 +453,7 @@ export async function handleOpenAiResponses(body, model, res, { signal, ids } = 
   };
 
   try {
-    for await (const event of streamChat(params, { signal })) {
+    for await (const event of streamChat(params, { signal, activity })) {
       switch (event.type) {
         case 'queue': {
           const item = ensureQueueItem();

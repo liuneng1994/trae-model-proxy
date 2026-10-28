@@ -162,42 +162,65 @@ export function retryDelayMs(attempt, retryAfter) {
   return Math.min(baseMs * 2 ** Math.max(0, attempt - 1), maxMs);
 }
 
-async function* streamChatOnce(params, { signal } = {}) {
+async function* streamChatOnce(params, { signal, activity } = {}) {
   const body = buildBody(params);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new Error('upstream timeout')), config.requestTimeoutMs);
   const onAbort = () => controller.abort(signal?.reason);
   if (signal) {
     if (signal.aborted) controller.abort(signal.reason);
     else signal.addEventListener('abort', onAbort, { once: true });
   }
 
+  // TRAE holds response headers while a request is queued. A fixed headers
+  // deadline turns a normal queue wait into a 504, so keep the connection open
+  // and report queue progress instead of aborting. Only a client disconnect
+  // cancels the wait.
+  const fetchPromise = fetch(process.env.TRAE_CHAT_URL || config.chatUrl, {
+    method: 'POST',
+    headers: buildHeaders(),
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  }).then(
+    (value) => ({ type: 'response', value }),
+    (err) => ({ type: 'error', err }),
+  );
+  const queueTickMs = Math.max(1000, config.queueKeepAliveMs || 0);
   let response;
-  const headersTimeout = setTimeout(() => controller.abort(new Error('upstream response headers timeout')),
-    Math.min(config.upstreamHeadersTimeoutMs, config.requestTimeoutMs));
-  try {
-    response = await fetch(process.env.TRAE_CHAT_URL || config.chatUrl, {
-      method: 'POST',
-      headers: buildHeaders(),
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    clearTimeout(headersTimeout);
-    inc('trae_upstream_requests_total', { status: String(response.status) });
-  } catch (err) {
-    clearTimeout(headersTimeout);
-    clearTimeout(timeout);
-    if (signal) signal.removeEventListener('abort', onAbort);
-    inc('trae_upstream_errors_total', { code: 'network' });
-    const reason = controller.signal.reason;
-    const timedOut =
-      reason instanceof Error && /^upstream .*timeout$/.test(reason.message);
-    throw new UpstreamError(`Failed to reach TRAE model gateway: ${err.message}`, {
-      status: timedOut ? 504 : 502,
-      retryable: true,
-      cause: err,
-    });
+  while (!response) {
+    const outcome = await Promise.race([
+      fetchPromise,
+      sleep(queueTickMs, controller.signal).then(
+        () => ({ type: 'tick' }),
+        (err) => ({ type: 'error', err }),
+      ),
+    ]);
+    if (outcome.type === 'response') {
+      response = outcome.value;
+    } else if (outcome.type === 'tick') {
+      yield {
+        type: 'queue',
+        phase: 'waiting',
+        position: null,
+        message: 'TRAE 排队等待中（等待上游响应）',
+      };
+    } else {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      inc('trae_upstream_errors_total', { code: 'network' });
+      const reason = controller.signal.reason;
+      const timedOut = reason instanceof Error && /^upstream .*timeout$/.test(reason.message);
+      throw new UpstreamError(`Failed to reach TRAE model gateway: ${outcome.err.message}`, {
+        status: timedOut ? 504 : 502,
+        retryable: true,
+        cause: outcome.err,
+      });
+    }
   }
+  if (activity) activity.upstreamStartedAt = Date.now();
+  inc('trae_upstream_requests_total', { status: String(response.status) });
+
+  // The generation deadline starts after the queue wait, so queueing time is
+  // not charged against the existing request timeout.
+  const timeout = setTimeout(() => controller.abort(new Error('upstream timeout')), config.requestTimeoutMs);
 
   let reportedUsage = null;
   try {
@@ -337,13 +360,13 @@ async function* streamChatOnce(params, { signal } = {}) {
   }
 }
 
-export async function* streamChat(params, { signal } = {}) {
+export async function* streamChat(params, { signal, activity } = {}) {
   params = { ...params, ...ensureSessionIds(params) };
   const attempts = Math.max(1, Number(process.env.TRAE_MAX_ATTEMPTS) || config.maxAttempts);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     let hasOutput = false;
     try {
-      for await (const event of streamChatOnce(params, { signal })) {
+      for await (const event of streamChatOnce(params, { signal, activity })) {
         if (
           event.type === 'text' ||
           event.type === 'reasoning' ||
@@ -377,23 +400,33 @@ export async function* streamChat(params, { signal } = {}) {
   }
 }
 
-export async function completeChat(params, { signal } = {}) {
+export async function completeChat(params, { signal, activity } = {}) {
   let text = '';
   let reasoning = '';
   let finishReason = 'stop';
   let usage = null;
   let metadata = null;
   const queueMessages = [];
+  let lastQueue = null;
+  let lastQueuePosition = null;
   const toolCalls = new Map();
   const completedTools = [];
 
-  for await (const event of streamChat(params, { signal })) {
+  for await (const event of streamChat(params, { signal, activity })) {
     switch (event.type) {
       case 'metadata':
         metadata = event.metadata;
         break;
       case 'queue':
         queueMessages.push(event.message);
+        if (event.position !== null && event.position !== undefined) {
+          lastQueuePosition = event.position;
+        }
+        lastQueue = {
+          phase: event.phase,
+          position: event.position ?? lastQueuePosition,
+          message: event.message,
+        };
         break;
       case 'text':
         text += event.delta;
@@ -447,6 +480,7 @@ export async function completeChat(params, { signal } = {}) {
     usage,
     metadata,
     queueMessages,
+    queue: lastQueue,
     toolCalls: [...completedTools, ...toolCalls.values()].sort((a, b) => a.index - b.index),
   };
 }

@@ -13,6 +13,8 @@
 | `POST /v1/messages/count_tokens` | Claude Code | 粗略 token 估算 |
 | `GET /healthz` | 运维 | 就绪检查；登录或模型目录不可用时返回 503 |
 | `GET /v1/capabilities` | 通用 | 当前代理支持的能力和兼容性限制 |
+| `GET /v1/update` | 运维 | 当前版本、远端 HEAD 与是否有新版本 |
+| `POST /v1/update/check` | 运维 | 立即检查 GitHub 远端版本 |
 
 ## 工作原理
 
@@ -190,12 +192,17 @@ Codex 和 Claude Code 都支持通过 `/model` 切换模型：
 
 ## 排队信息
 
-TRAE 上游在排队或限流时会发送 `progress_notice` 事件。代理会：
+TRAE 上游在排队时会延迟返回响应头。代理会一直保持请求排队等待，不会因为等待响应头而返回 504；排队等待时间不计入 `PROXY_REQUEST_TIMEOUT_MS`，只有客户端断开才会取消请求。
+
+上游发送 `progress_notice` 事件后，代理会：
 
 - 在代理日志中打印排队消息；
 - Codex：通过 `response.in_progress(status="queued")` 和 reasoning summary 展示；
-- Claude Code：在 thinking 块中展示 `[TRAE queue] ...`；
-- OpenAI Chat：在 `reasoning_content` 中展示 `[TRAE queue] ...`。
+- Claude Code：在 `ping` 事件中携带 `queue_phase`、`queue_position` 和 `queue` 文案；
+- OpenAI Chat：在 `reasoning_content` 中展示 `[TRAE queue] ...`；
+- 非流式响应：通过 `x-trae-queue-phase` 和 `x-trae-queue-position` 响应头返回最近一次排队状态。
+
+等待上游响应头期间，代理会周期性发送 `phase: "waiting"` 的排队状态；拿到 `Queue position N` 后，`position` 会带上具体位置。
 
 实时查看排队进度：
 
@@ -205,6 +212,26 @@ curl -N http://127.0.0.1:8787/v1/queue/stream
 ```
 
 `/healthz` 也会返回最近的 `queue` 状态。
+
+## 自动更新
+
+服务进程会每 30 分钟从 GitHub 仓库检查一次版本，发现 `origin/main` 有新提交时自动拉取并重新部署。
+
+```bash
+curl http://127.0.0.1:8787/v1/update          # 当前版本、远端 HEAD、落后提交数
+curl -X POST http://127.0.0.1:8787/v1/update/check  # 立即检查
+```
+
+行为说明：
+
+- 版本源为 `git remote get-url origin`（默认 `https://github.com/liuneng1994/trae-model-proxy.git`），比较本地 `HEAD` 与 `origin/main`；
+- 有新提交时执行 `git pull --ff-only`，然后以 `scripts/install-all.mjs --replace` 重新部署；
+- 工作区存在未提交的已跟踪文件改动时会拒绝自动更新，避免覆盖本地修改；
+- 拉取或部署日志写入 `$TMPDIR/trae-model-proxy-auto-update.log`；
+- `/healthz` 的 `update` 字段会返回最近一次检查结果；
+- 手动检查：`npm run update:check`；检查并应用：`npm run update:apply`。
+
+关闭或调整：见下方环境变量表中的 `PROXY_UPDATE_*`。
 
 ## 客户端配置
 
@@ -403,6 +430,7 @@ curl http://127.0.0.1:8787/healthz        # 登录、模型数、目录同步、
 curl http://127.0.0.1:8787/metrics        # Prometheus 文本指标
 curl http://127.0.0.1:8787/v1/queue       # 当前排队状态
 curl -N http://127.0.0.1:8787/v1/queue/stream  # 排队进度 SSE
+curl http://127.0.0.1:8787/v1/update      # 版本检查状态
 curl -X POST http://127.0.0.1:8787/v1/models/refresh
 npm run doctor                        # 代理、Codex、Claude 配置体检
 ```
@@ -424,15 +452,19 @@ npm run doctor                        # 代理、Codex、Claude 配置体检
 | `TRAE_ACCESS_TOKEN` | 空 | 覆盖 `auth.json` 中的 access token |
 | `TRAE_AUTH_FILE` | `~/.trae/cli/auth.json` | TRAE 登录凭证路径 |
 | `TRAECLI_BIN` | `traecli` | 用于读取模型目录 |
-| `PROXY_REQUEST_TIMEOUT_MS` | `300000` | 整个生成请求超时 |
-| `TRAE_UPSTREAM_HEADERS_TIMEOUT_MS` | `30000` | 等待上游响应头超时；与整体请求超时取较小值 |
+| `PROXY_REQUEST_TIMEOUT_MS` | `300000` | 上游返回响应头后的生成超时；排队等待时间不计入 |
 | `TRAE_MAX_ATTEMPTS` | `3` | 上游 429/5xx 最大尝试次数 |
 | `TRAE_RETRY_BASE_MS` | `500` | 重试退避基数 |
 | `TRAE_RETRY_MAX_MS` | `10000` | 单次重试最大等待 |
 | `TRAE_MODEL_REFRESH_MS` | `300000` | 模型目录自动刷新间隔，0 关闭 |
 | `PROXY_SYNC_CODEX_CATALOG` | `1` | 是否自动写 Codex 模型目录 |
 | `PROXY_CODEX_CATALOG_PATH` | `~/.codex/trae-models.json` | Codex 模型目录路径 |
-| `PROXY_QUEUE_KEEPALIVE_MS` | `15000` | 排队 SSE 心跳间隔 |
+| `PROXY_QUEUE_KEEPALIVE_MS` | `15000` | 排队 SSE 心跳及等待上游响应头时的排队状态上报间隔 |
+| `PROXY_UPDATE_CHECK` | `1` | 是否启用定时版本检查 |
+| `PROXY_UPDATE_INTERVAL_MS` | `1800000` | 版本检查间隔，最小 60000 |
+| `PROXY_UPDATE_REMOTE` | `origin` | 版本检查使用的 git 远端 |
+| `PROXY_UPDATE_BRANCH` | `main` | 版本检查跟踪的分支 |
+| `PROXY_AUTO_UPDATE` | `1` | 发现新版本时自动拉取并重新部署 |
 | `PROXY_LOG_FORMAT` | `text` | `text` 或 `json` |
 | `PROXY_ALLOW_INSECURE_BIND` | `0` | 允许非 loopback 且无 API key 启动 |
 | `PROXY_VERBOSE` | `0` | 输出调试日志 |

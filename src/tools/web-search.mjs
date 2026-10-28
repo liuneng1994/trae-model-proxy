@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { completeChat } from '../upstream/trae-client.mjs';
 import { searchTrae } from '../upstream/trae-search.mjs';
 import { textBlock, toTraeTool, ensureToolId, mapUsageToAnthropic, mapStopReasonToAnthropic, applyStopSequences } from '../adapters/common.mjs';
-import { startSSE, writeSSEEvent, endSSE } from '../util/http.mjs';
+import { startSSE, writeSSEEvent, endSSE, setQueueHeaders } from '../util/http.mjs';
 import { ensureSessionIds } from '../util/session.mjs';
 
 const SUPPORTED_TYPES = new Set(['web_search_20250305']);
@@ -97,7 +97,7 @@ export async function executeWebSearch(query, tool, { signal } = {}) {
   }
 }
 
-export async function handleWebSearchMessages(body, params, res, { signal } = {}) {
+export async function handleWebSearchMessages(body, params, res, { signal, activity } = {}) {
   const tool = body.tools.find(isWebSearchTool);
   const maxUses = tool.max_uses ?? 5;
   params = {
@@ -143,10 +143,12 @@ export async function handleWebSearchMessages(body, params, res, { signal } = {}
   }
   let stopReason = 'end_turn';
   let stopSequence = null;
+  let lastQueue = null;
   try {
     // One extra round lets the model consume a max_uses_exceeded result.
     for (let round = 0; round < maxUses + 2; round++) {
-      const result = await completeChat(params, { signal });
+      const result = await completeChat(params, { signal, activity });
+      if (result.queue) lastQueue = result.queue;
       const roundUsage = mapUsageToAnthropic(result.usage);
       for (const key of Object.keys(usage)) usage[key] += roundUsage[key] || 0;
       const filtered = applyStopSequences(result.text, params.stopSequences);
@@ -198,6 +200,7 @@ export async function handleWebSearchMessages(body, params, res, { signal } = {}
       if (round === maxUses + 1) stopReason = 'pause_turn';
     }
     usage.server_tool_use = { web_search_requests: Math.min(used, maxUses) };
+    setQueueHeaders(res, lastQueue);
     const message = { id, type: 'message', role: 'assistant', model: body.model, content,
       stop_reason: stopReason, stop_sequence: stopSequence, usage };
     if (body.stream) {

@@ -22,6 +22,8 @@
     "service:restart": "node scripts/service.mjs restart",
     "service:status": "node scripts/service.mjs status",
     "doctor": "node scripts/doctor.mjs",
+    "update:check": "node scripts/update.mjs",
+    "update:apply": "node scripts/update.mjs --apply",
     "capture": "node scripts/capture.mjs",
     "test": "node --test test/*.test.mjs",
     "test:clients": "RUN_CLIENT_SMOKE=1 node --test test/client-smoke.test.mjs",

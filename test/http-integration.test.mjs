@@ -29,7 +29,7 @@ async function startProxy(extra = {}) {
       PROXY_HOST: '127.0.0.1', PROXY_PORT: String(port), TRAECLI_BIN: path.join(root, 'traecli'),
       TRAE_HOME: root, TRAECLI_HOME: root, TRAE_MODEL_REFRESH_MS: '0', PROXY_SYNC_CODEX_CATALOG: '0',
       TRAE_CHAT_URL: `http://127.0.0.1:${upstream.address().port}`, TRAE_MAX_ATTEMPTS: '1',
-      PROXY_REQUEST_TIMEOUT_MS: '500', PROXY_MAX_BODY_BYTES: '4096', ...extra },
+      PROXY_REQUEST_TIMEOUT_MS: '500', PROXY_MAX_BODY_BYTES: '4096', PROXY_UPDATE_CHECK: '0', ...extra },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   await new Promise((resolve, reject) => {
@@ -72,6 +72,13 @@ await test('HTTP proxy end-to-end contracts with an isolated mock gateway', asyn
     for await (const chunk of req) raw += chunk;
     upstreamBodies.push(JSON.parse(raw));
     if (mode === 'rate') { res.writeHead(429, { 'retry-after': '2' }); res.end('limit'); return; }
+    if (mode === 'queue') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: progress_notice\ndata: ;Queue position 3\n\n');
+      res.write(output({ response: 'OK' }));
+      res.end('event: done\ndata: {"finish_reason":"stop"}\n\n');
+      return;
+    }
     if (mode === 'timeout') return;
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(output({ response: mode === 'partial' ? 'partial' : 'OK', reasoning_content: 'summary' }));
@@ -83,7 +90,7 @@ await test('HTTP proxy end-to-end contracts with an isolated mock gateway', asyn
   try {
     ({ child: proxy, url: baseUrl } = await startProxy());
     await t.test('protects discovery, metrics, queue and generation consistently', async () => {
-      for (const endpoint of ['/v1/models', '/models', '/v1/models/codex', '/v1/queue', '/v1/queue/stream', '/metrics', '/v1/capabilities']) {
+      for (const endpoint of ['/v1/models', '/models', '/v1/models/codex', '/v1/queue', '/v1/queue/stream', '/v1/update', '/metrics', '/v1/capabilities']) {
         const response = await fetch(baseUrl + endpoint);
         assert.equal(response.status, 401, endpoint);
       }
@@ -100,6 +107,13 @@ await test('HTTP proxy end-to-end contracts with an isolated mock gateway', asyn
       ]);
       const anthropic = await (await fetch(baseUrl + '/v1/models', { headers: { ...authHeaders, 'anthropic-version': '2023-06-01' } })).json();
       assert.ok(anthropic.data.some((entry) => entry.id === 'claude-trae-test-max[1m]'));
+    });
+    await t.test('update status is exposed and disabled when configured off', async () => {
+      const state = await (await fetch(baseUrl + '/v1/update', { headers: authHeaders })).json();
+      assert.equal(state.enabled, false);
+      assert.equal(state.remote, 'origin');
+      assert.equal(state.branch, 'main');
+      assert.equal(state.updateAvailable, false);
     });
     await t.test('all three APIs return usable nonstream and stream responses', async () => {
       mode = 'success';
@@ -194,9 +208,29 @@ await test('HTTP proxy end-to-end contracts with an isolated mock gateway', asyn
       const wire = await (await post('/v1/responses', requestFor('/v1/responses', true))).text();
       assert.ok(wire.includes('event: response.incomplete'));
     });
-    await t.test('hung upstream requests time out and release active requests', async () => {
+    await t.test('queue position is exposed to nonstream and stream clients', async () => {
+      mode = 'queue';
+      const nonStream = await post('/v1/messages', requestFor('/v1/messages'));
+      assert.equal(nonStream.status, 200);
+      assert.equal(nonStream.headers.get('x-trae-queue-phase'), 'queued');
+      assert.equal(nonStream.headers.get('x-trae-queue-position'), '3');
+      assert.ok(JSON.stringify(await nonStream.json()).includes('OK'));
+
+      const stream = await post('/v1/messages', requestFor('/v1/messages', true));
+      const wire = await stream.text();
+      assert.ok(wire.includes('event: ping'));
+      assert.ok(wire.includes('"queue_phase":"queued"'));
+      assert.ok(wire.includes('"queue_position":3'));
+    });
+    await t.test('hung upstream stays queued until the client disconnects', async () => {
       mode = 'timeout';
-      assert.equal((await post('/v1/chat/completions', requestFor('/v1/chat/completions'))).status, 504);
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error('test timeout')), 1500);
+      await assert.rejects(fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...authHeaders },
+        body: JSON.stringify(requestFor('/v1/chat/completions')), signal: controller.signal,
+      }), /aborted|test timeout/);
+      await new Promise((resolve) => setTimeout(resolve, 200));
       const metrics = await (await fetch(baseUrl + '/metrics', { headers: authHeaders })).text();
       assert.ok(metrics.includes('proxy_active_requests 0'));
     });

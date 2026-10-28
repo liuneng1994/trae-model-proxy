@@ -14,7 +14,7 @@ import {
   toTraeTool,
   toolChoiceInstruction,
 } from './common.mjs';
-import { endSSE, startSSE, writeSSE } from '../util/http.mjs';
+import { endSSE, setQueueHeaders, startSSE, writeSSE } from '../util/http.mjs';
 
 function contentBlocks(content) {
   if (typeof content === 'string') return [textBlock(content)];
@@ -133,13 +133,14 @@ function toOpenAiToolCalls(toolCalls) {
   }));
 }
 
-export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
+export async function handleOpenAiChat(body, model, res, { signal, ids, activity } = {}) {
   const params = toTraeRequest(body, model, ids);
   const created = Math.floor(Date.now() / 1000);
   const id = `chatcmpl-${Date.now().toString(36)}`;
 
   if (!body.stream) {
-    const result = await completeChat(params, { signal });
+    const result = await completeChat(params, { signal, activity });
+    setQueueHeaders(res, result.queue);
     const toolCalls = toOpenAiToolCalls(result.toolCalls);
     const filtered = applyStopSequences(result.text, params.stopSequences);
     return {
@@ -186,7 +187,7 @@ export async function handleOpenAiChat(body, model, res, { signal, ids } = {}) {
   send({ role: 'assistant', content: '' });
 
   try {
-    for await (const event of streamChat(params, { signal })) {
+    for await (const event of streamChat(params, { signal, activity })) {
       switch (event.type) {
         case 'text': {
           const { text } = stopFilter.push(event.delta);

@@ -15,9 +15,11 @@ const RUNTIME_ENV_KEYS = [
   'TRAE_MODEL_PREFIX', 'TRAE_CHAT_URL', 'TRAE_ACCOUNT_URL', 'TRAE_APP_ID',
   'TRAE_IDE_VERSION_CODE', 'TRAE_IDE_FUNCTION', 'TRAE_ORIGINATOR', 'TRAE_USER_AGENT',
   'TRAE_CLI_VERSION', 'PROXY_MAX_BODY_BYTES', 'PROXY_REQUEST_TIMEOUT_MS',
-  'TRAE_UPSTREAM_HEADERS_TIMEOUT_MS', 'TRAE_MAX_ATTEMPTS', 'TRAE_RETRY_BASE_MS', 'TRAE_RETRY_MAX_MS', 'TRAE_MODEL_CACHE_MS',
+  'TRAE_MAX_ATTEMPTS', 'TRAE_RETRY_BASE_MS', 'TRAE_RETRY_MAX_MS', 'TRAE_MODEL_CACHE_MS',
   'TRAE_MODEL_REFRESH_MS', 'PROXY_SYNC_CODEX_CATALOG', 'PROXY_CODEX_CATALOG_PATH',
-  'PROXY_QUEUE_KEEPALIVE_MS', 'TRAE_DEFAULT_MAX_TOKENS', 'TRAE_DEFAULT_REASONING_EFFORT',
+  'PROXY_QUEUE_KEEPALIVE_MS', 'PROXY_UPDATE_CHECK', 'PROXY_UPDATE_INTERVAL_MS',
+  'PROXY_UPDATE_REMOTE', 'PROXY_UPDATE_BRANCH', 'PROXY_AUTO_UPDATE',
+  'TRAE_DEFAULT_MAX_TOKENS', 'TRAE_DEFAULT_REASONING_EFFORT',
   'TRAE_HOME', 'TRAECLI_HOME', 'TRAE_AUTH_FILE', 'TRAE_ACCESS_TOKEN',
   'TRAE_AUTH_SCHEME', 'TRAE_REGION', 'TRAECLI_BIN', 'PROXY_VERBOSE',
   'PROXY_LOG_FORMAT', 'PROXY_ALLOW_INSECURE_BIND',
@@ -117,6 +119,24 @@ function writePrivate(file, content) {
   fs.writeFileSync(file, content, { mode: 0o600 });
   fs.chmodSync(file, 0o600);
 }
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function bootstrapService(domain, configPath) {
+  // launchd can report "Bootstrap failed: 5" while the previous job is still
+  // releasing its process slot. Retry briefly instead of leaving the service down.
+  let lastError = null;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      run('launchctl', ['bootstrap', domain, configPath]);
+      return;
+    } catch (err) {
+      lastError = err;
+      sleepMs(500);
+    }
+  }
+  throw lastError;
+}
 function readState(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
@@ -139,7 +159,7 @@ function serviceAction(command, { dryRun = false, force = false, platform = proc
     if (platform === 'darwin') {
       fs.mkdirSync(path.join(context.home, 'Library', 'Logs'), { recursive: true });
       run('launchctl', ['bootout', `${darwinDomain()}/${LABEL}`], { ignore: true });
-      run('launchctl', ['bootstrap', darwinDomain(), target.config]);
+      bootstrapService(darwinDomain(), target.config);
       run('launchctl', ['kickstart', '-k', `${darwinDomain()}/${LABEL}`], { ignore: true });
     } else {
       run('systemctl', ['--user', 'daemon-reload']);
@@ -171,7 +191,7 @@ function serviceAction(command, { dryRun = false, force = false, platform = proc
     else if (command === 'start' || command === 'restart') {
       if (!current) throw new Error(`service not installed: ${target.config}`);
       run('launchctl', ['bootout', `${darwinDomain()}/${LABEL}`], { ignore: true });
-      run('launchctl', ['bootstrap', darwinDomain(), target.config]);
+      bootstrapService(darwinDomain(), target.config);
       run('launchctl', ['kickstart', '-k', `${darwinDomain()}/${LABEL}`], { ignore: true });
     } else throw new Error(`unknown command: ${command}`);
   } else if (['start', 'stop', 'restart'].includes(command)) run('systemctl', ['--user', command, UNIT]);
